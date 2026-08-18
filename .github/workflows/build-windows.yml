@@ -4,10 +4,12 @@ on:
   push:
     branches:
       - release/v3.3.4
+    paths-ignore:
+      - '.github/workflows/**'
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: mixar-app3-release-v3.3.4-windows
@@ -73,8 +75,6 @@ jobs:
             throw "MIXAR_VERSION_PATCH in $headerPath does not match VERSION $version (expected $patch)"
           }
 
-          # Prove the bundled config cannot be forced back to an old version by
-          # a stale CI/shell MIXAR_VERSION variable.
           $env:MIXAR_VERSION = '3.3.2'
           $testConfig = Join-Path $env:RUNNER_TEMP 'mixar-version-test.json'
           python scripts/generate_config.py --output $testConfig
@@ -128,7 +128,7 @@ jobs:
         shell: cmd
         run: call scripts\windows\build_ninja.bat
 
-      - name: Upload compiled Mixar 3.3.4 immediately
+      - name: Upload compiled Mixar 3.3.4 artifact
         uses: actions/upload-artifact@v4
         with:
           name: mixar-3.3.4-windows-x64-prod
@@ -136,56 +136,3 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
-
-      - name: Package Mixar 3.3.4 release
-        shell: powershell
-        run: |
-          $asset = 'mixar-3.3.4-windows-x64-prod.zip'
-          $checksum = 'mixar-3.3.4-windows-x64-prod.sha256'
-
-          if (Test-Path $asset) { Remove-Item $asset -Force }
-          if (Test-Path $checksum) { Remove-Item $checksum -Force }
-
-          Compress-Archive -Path 'build\Prod\bin\*' -DestinationPath $asset -CompressionLevel Optimal
-          if (-not (Test-Path $asset)) {
-            throw "Release archive was not created: $asset"
-          }
-
-          $hash = (Get-FileHash -Algorithm SHA256 $asset).Hash.ToLowerInvariant()
-          "$hash  $asset" | Set-Content -Path $checksum -Encoding ascii
-
-          Write-Host "Release asset : $asset"
-          Write-Host "SHA-256       : $hash"
-
-      - name: Publish Mixar 3.3.4 to GitHub Releases
-        shell: powershell
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $tag = 'v3.3.4'
-          $asset = 'mixar-3.3.4-windows-x64-prod.zip'
-          $checksum = 'mixar-3.3.4-windows-x64-prod.sha256'
-
-          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
-          $releaseExists = ($LASTEXITCODE -eq 0)
-
-          if ($releaseExists) {
-            Write-Host "Release $tag already exists; replacing Windows assets."
-            gh release upload $tag $asset $checksum --clobber --repo $env:GITHUB_REPOSITORY
-            if ($LASTEXITCODE -ne 0) {
-              throw "Failed to upload assets to existing release $tag"
-            }
-          }
-          else {
-            Write-Host "Creating release $tag from commit $env:GITHUB_SHA."
-            gh release create $tag $asset $checksum `
-              --repo $env:GITHUB_REPOSITORY `
-              --target $env:GITHUB_SHA `
-              --title 'Mixar 3.3.4' `
-              --notes 'Mixar 3.3.4 Windows x64 production build. Includes the compiled application bundle and SHA-256 checksum.'
-            if ($LASTEXITCODE -ne 0) {
-              throw "Failed to create release $tag"
-            }
-          }
-
-          gh release view $tag --repo $env:GITHUB_REPOSITORY
