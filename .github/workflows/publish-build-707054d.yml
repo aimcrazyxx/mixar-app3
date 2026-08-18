@@ -19,6 +19,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       TARGET_SHA: 707054d77ace9cf940fdcef9a35595f821949580
+      RELEASE_TARGET: main
       ARTIFACT_NAME: mixar-3.3.4-windows-x64-prod
       RELEASE_TAG: v3.3.4
       RELEASE_ASSET: mixar-3.3.4-windows-x64-prod.zip
@@ -89,10 +90,6 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
 
-          # Check the tag through the GitHub REST API. Do not use
-          # `gh release view` for existence detection under PowerShell 5 with
-          # ErrorActionPreference=Stop: a normal 404 is emitted on stderr as a
-          # NativeCommandError and terminates the step before we can create it.
           $headers = @{
             Authorization = "Bearer $env:GH_TOKEN"
             Accept = 'application/vnd.github+json'
@@ -116,7 +113,7 @@ jobs:
           }
 
           if ($releaseExists) {
-            Write-Host "Release exists; replacing assets with build from $env:TARGET_SHA"
+            Write-Host "Release exists; replacing assets with exact build from $env:TARGET_SHA"
             gh release upload $env:RELEASE_TAG `
               $env:RELEASE_ASSET $env:RELEASE_CHECKSUM `
               --clobber `
@@ -124,13 +121,19 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'Failed to upload release assets.' }
           }
           else {
-            Write-Host "Creating release $env:RELEASE_TAG from compiled commit $env:TARGET_SHA"
+            # IMPORTANT: do not target TARGET_SHA here. That commit is on a branch
+            # which changes files under .github/workflows relative to the default
+            # branch. GitHub refuses release creation with GITHUB_TOKEN in that
+            # situation (403 Resource not accessible by integration). Create the
+            # release/tag from the default branch, then attach the binary produced
+            # by TARGET_SHA. The release notes record the exact compiled commit.
+            Write-Host "Creating release $env:RELEASE_TAG on $env:RELEASE_TARGET and attaching build from $env:TARGET_SHA"
             gh release create $env:RELEASE_TAG `
               $env:RELEASE_ASSET $env:RELEASE_CHECKSUM `
               --repo $env:GITHUB_REPOSITORY `
-              --target $env:TARGET_SHA `
+              --target $env:RELEASE_TARGET `
               --title 'Mixar 3.3.4' `
-              --notes 'Windows x64 production build taken directly from the successful ChatGPT Windows Build for commit 707054d77ace9cf940fdcef9a35595f821949580. No recompilation.'
+              --notes "Mixar 3.3.4 Windows x64 production build. Binary source commit: $env:TARGET_SHA (successful ChatGPT Windows Build). The release tag itself is created from $env:RELEASE_TARGET only to avoid GitHub's GITHUB_TOKEN workflow-file restriction; the attached ZIP is the exact artifact compiled from $env:TARGET_SHA. No recompilation."
             if ($LASTEXITCODE -ne 0) { throw 'Failed to create release.' }
           }
 
