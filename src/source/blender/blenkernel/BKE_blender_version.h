@@ -26,7 +26,7 @@
 #define BLENDER_VERSION_CYCLE release
 
 #define MIXAR_VERSION 303
-#define MIXAR_VERSION_PATCH 2
+#define MIXAR_VERSION_PATCH 4
 #define MIXAR_VERSION_CYCLE release
 
 /* Mixar file format version, stored in FileGlobal.
@@ -65,7 +65,7 @@ const char *BKE_blender_version_string_compact(void);
 /** Returns true when version cycle is alpha, otherwise (beta, rc) returns false. */
 bool BKE_blender_version_is_alpha(void);
 
-/** Returns true when version suffix is LTS, otherwise returns false. */
+/** As above but does not show patch version. */
 bool BKE_blender_version_is_lts(void);
 
 /**
