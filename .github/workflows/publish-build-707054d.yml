@@ -1,0 +1,112 @@
+name: Publish Existing Mixar Build 707054d
+
+on:
+  push:
+    branches:
+      - release/v3.3.4
+    paths:
+      - '.github/workflows/publish-build-707054d.yml'
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish-existing-build:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TARGET_SHA: 707054d77ace9cf940fdcef9a35595f821949580
+      ARTIFACT_NAME: mixar-3.3.4-windows-x64-prod
+      RELEASE_TAG: v3.3.4
+      RELEASE_ASSET: mixar-3.3.4-windows-x64-prod.zip
+      RELEASE_CHECKSUM: mixar-3.3.4-windows-x64-prod.sha256
+
+    steps:
+      - name: Find successful build for exact commit
+        id: build
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $runsJson = gh run list `
+            --repo $env:GITHUB_REPOSITORY `
+            --workflow 'ChatGPT Windows Build' `
+            --branch 'release/v3.3.4' `
+            --status success `
+            --limit 50 `
+            --json databaseId,headSha,displayTitle,createdAt
+
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Failed to list successful Windows build runs.'
+          }
+
+          $runs = $runsJson | ConvertFrom-Json
+          $run = $runs | Where-Object { $_.headSha -eq $env:TARGET_SHA } | Select-Object -First 1
+          if (-not $run) {
+            throw "No successful ChatGPT Windows Build found for commit $env:TARGET_SHA"
+          }
+
+          "run_id=$($run.databaseId)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "Found exact successful build run: $($run.databaseId)"
+          Write-Host "Commit: $($run.headSha)"
+          Write-Host "Title : $($run.displayTitle)"
+
+      - name: Download artifact from exact successful build
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path artifact -Force | Out-Null
+          gh run download '${{ steps.build.outputs.run_id }}' `
+            --repo $env:GITHUB_REPOSITORY `
+            --name $env:ARTIFACT_NAME `
+            --dir artifact
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to download $env:ARTIFACT_NAME from build run ${{ steps.build.outputs.run_id }}"
+          }
+          $files = Get-ChildItem artifact -Recurse -File
+          if (-not $files) {
+            throw 'Downloaded artifact is empty.'
+          }
+          Write-Host "Downloaded $($files.Count) files from the already compiled build."
+
+      - name: Package release asset
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (Test-Path $env:RELEASE_ASSET) { Remove-Item $env:RELEASE_ASSET -Force }
+          if (Test-Path $env:RELEASE_CHECKSUM) { Remove-Item $env:RELEASE_CHECKSUM -Force }
+
+          Compress-Archive -Path 'artifact\*' -DestinationPath $env:RELEASE_ASSET -CompressionLevel Optimal
+          $hash = (Get-FileHash -Algorithm SHA256 $env:RELEASE_ASSET).Hash.ToLowerInvariant()
+          "$hash  $env:RELEASE_ASSET" | Set-Content -Path $env:RELEASE_CHECKSUM -Encoding ascii
+          Write-Host "Release asset: $env:RELEASE_ASSET"
+          Write-Host "SHA-256: $hash"
+
+      - name: Publish exact build to GitHub Release v3.3.4
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "Release exists; replacing assets with build from $env:TARGET_SHA"
+            gh release upload $env:RELEASE_TAG `
+              $env:RELEASE_ASSET $env:RELEASE_CHECKSUM `
+              --clobber `
+              --repo $env:GITHUB_REPOSITORY
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to upload release assets.' }
+          }
+          else {
+            Write-Host "Creating release $env:RELEASE_TAG from compiled commit $env:TARGET_SHA"
+            gh release create $env:RELEASE_TAG `
+              $env:RELEASE_ASSET $env:RELEASE_CHECKSUM `
+              --repo $env:GITHUB_REPOSITORY `
+              --target $env:TARGET_SHA `
+              --title 'Mixar 3.3.4' `
+              --notes 'Windows x64 production build taken directly from the successful ChatGPT Windows Build for commit 707054d77ace9cf940fdcef9a35595f821949580. No recompilation.'
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to create release.' }
+          }
+
+          gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY
