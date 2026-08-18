@@ -1,0 +1,138 @@
+name: ChatGPT Windows Build
+
+on:
+  push:
+    branches:
+      - release/v3.3.4
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mixar-app3-release-v3.3.4-windows
+  cancel-in-progress: true
+
+jobs:
+  build-windows:
+    runs-on: windows-2022
+    timeout-minutes: 360
+    env:
+      MIXAR_ENV: Prod
+      BUILD_CORES: 4
+      ROBOCOPY_THREADS: 16
+
+    steps:
+      - name: Checkout Mixar source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: false
+          lfs: false
+
+      - name: Use all runner CPU cores
+        shell: powershell
+        run: |
+          $detected = [Environment]::ProcessorCount
+          if ($detected -lt 1) { $detected = 4 }
+
+          $cores = [Math]::Max($detected, 4)
+          $robocopyThreads = [Math]::Min([Math]::Max($cores * 4, 16), 128)
+
+          "BUILD_CORES=$cores" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CMAKE_BUILD_PARALLEL_LEVEL=$cores" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "ROBOCOPY_THREADS=$robocopyThreads" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          Write-Host "Detected logical CPUs : $detected"
+          Write-Host "Compile jobs          : $cores"
+          Write-Host "CMake parallel level  : $cores"
+          Write-Host "Robocopy threads      : $robocopyThreads"
+
+      - name: Validate Mixar release version
+        shell: powershell
+        run: |
+          $version = (Get-Content VERSION -Raw).Trim()
+          if ($version -ne '3.3.4') {
+            throw "VERSION must be 3.3.4 for release/v3.3.4, found: $version"
+          }
+
+          $parts = $version.Split('.')
+          if ($parts.Count -ne 3) {
+            throw "Invalid VERSION format: $version"
+          }
+
+          $packed = ([int]$parts[0] * 100) + [int]$parts[1]
+          $patch = [int]$parts[2]
+          $headerPath = 'src\source\blender\blenkernel\BKE_blender_version.h'
+          $header = Get-Content $headerPath -Raw
+
+          if ($header -notmatch "(?m)^#define\s+MIXAR_VERSION\s+$packed\s*$") {
+            throw "MIXAR_VERSION in $headerPath does not match VERSION $version (expected $packed)"
+          }
+          if ($header -notmatch "(?m)^#define\s+MIXAR_VERSION_PATCH\s+$patch\s*$") {
+            throw "MIXAR_VERSION_PATCH in $headerPath does not match VERSION $version (expected $patch)"
+          }
+
+          # Prove the bundled config cannot be forced back to an old version by
+          # a stale CI/shell MIXAR_VERSION variable.
+          $env:MIXAR_VERSION = '3.3.2'
+          $testConfig = Join-Path $env:RUNNER_TEMP 'mixar-version-test.json'
+          python scripts/generate_config.py --output $testConfig
+          if ($LASTEXITCODE -ne 0) {
+            throw 'generate_config.py version test failed'
+          }
+          $config = Get-Content $testConfig -Raw | ConvertFrom-Json
+          if ($config.app_info.version -ne '3.3.4') {
+            throw "Bundled config would report $($config.app_info.version), expected 3.3.4"
+          }
+          Remove-Item Env:MIXAR_VERSION -ErrorAction SilentlyContinue
+
+          Write-Host "Version synchronized: Mixar $version (MIXAR_VERSION=$packed, PATCH=$patch)"
+          Write-Host "Bundled mixar.json version source is locked to VERSION=$version"
+
+      - name: Normalize Windows batch files
+        shell: powershell
+        run: |
+          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+          Get-ChildItem -Path scripts\windows -Recurse -File | Where-Object { $_.Extension -in '.bat', '.cmd' } | ForEach-Object {
+            $text = [System.IO.File]::ReadAllText($_.FullName)
+            $text = $text -replace "`r?`n", "`r`n"
+            [System.IO.File]::WriteAllText($_.FullName, $text, $utf8NoBom)
+          }
+          Write-Host 'Normalized repository batch scripts to CRLF.'
+
+      - name: Install build helper tools
+        shell: powershell
+        run: |
+          git lfs install
+          if (-not (Get-Command make -ErrorAction SilentlyContinue)) {
+            choco install make -y --no-progress
+          }
+          if (-not (Get-Command svn -ErrorAction SilentlyContinue)) {
+            choco install subversion -y --no-progress
+          }
+          if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) {
+            choco install ninja -y --no-progress
+          }
+          cmake --version
+          ninja --version
+          git lfs version
+          svn --version --quiet
+          make --version
+
+      - name: Initialize Blender upstream and dependencies
+        shell: cmd
+        run: call scripts\windows\init.bat
+
+      - name: Build Mixar Windows x64 (Prod)
+        shell: cmd
+        run: call scripts\windows\build_ninja.bat
+
+      - name: Upload compiled Mixar 3.3.4 immediately
+        uses: actions/upload-artifact@v4
+        with:
+          name: mixar-3.3.4-windows-x64-prod
+          path: build/Prod/bin/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
