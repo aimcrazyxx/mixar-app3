@@ -89,8 +89,33 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
 
-          gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY *> $null
-          if ($LASTEXITCODE -eq 0) {
+          # Check the tag through the GitHub REST API. Do not use
+          # `gh release view` for existence detection under PowerShell 5 with
+          # ErrorActionPreference=Stop: a normal 404 is emitted on stderr as a
+          # NativeCommandError and terminates the step before we can create it.
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            Accept = 'application/vnd.github+json'
+            'X-GitHub-Api-Version' = '2022-11-28'
+          }
+          $releaseUrl = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$env:RELEASE_TAG"
+          $releaseExists = $false
+          try {
+            Invoke-RestMethod -Uri $releaseUrl -Headers $headers -Method Get | Out-Null
+            $releaseExists = $true
+          }
+          catch {
+            $statusCode = $null
+            if ($_.Exception.Response) {
+              $statusCode = [int]$_.Exception.Response.StatusCode
+            }
+            if ($statusCode -ne 404) {
+              throw
+            }
+            Write-Host "Release $env:RELEASE_TAG does not exist yet; it will be created."
+          }
+
+          if ($releaseExists) {
             Write-Host "Release exists; replacing assets with build from $env:TARGET_SHA"
             gh release upload $env:RELEASE_TAG `
               $env:RELEASE_ASSET $env:RELEASE_CHECKSUM `
@@ -110,3 +135,4 @@ jobs:
           }
 
           gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY
+          if ($LASTEXITCODE -ne 0) { throw 'Release verification failed after publish.' }
