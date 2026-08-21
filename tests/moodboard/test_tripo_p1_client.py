@@ -6,7 +6,6 @@ import json
 
 import httpx
 import pytest
-
 from mixar.modules.moodboard.core.tripo_p1_client import TripoP1Client, TripoP1Error
 
 
@@ -134,3 +133,44 @@ def test_poll_rejects_unsafe_model_download_url():
             client.wait_for_model("task", interval=0.01)
     finally:
         client.close()
+
+
+def test_http_error_does_not_echo_tripo_api_key():
+    secret = "tripo-secret-123"
+
+    client = TripoP1Client(
+        secret,
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                401, json={"message": f"Credential {secret} is invalid"}
+            )
+        ),
+    )
+    try:
+        with pytest.raises(TripoP1Error) as error:
+            client.upload_image(b"\xff\xd8\xffimage", "front.jpg")
+    finally:
+        client.close()
+
+    assert secret not in str(error.value)
+    assert "[REDACTED]" in str(error.value)
+
+
+def test_api_error_body_does_not_echo_tripo_api_key():
+    secret = "tripo-secret-456"
+    client = TripoP1Client(
+        secret,
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200, json={"code": 1001, "message": f"Invalid {secret}"}
+            )
+        ),
+    )
+    try:
+        with pytest.raises(TripoP1Error) as error:
+            client.upload_image(b"\xff\xd8\xffimage", "front.jpg")
+    finally:
+        client.close()
+
+    assert secret not in str(error.value)
+    assert "[REDACTED]" in str(error.value)

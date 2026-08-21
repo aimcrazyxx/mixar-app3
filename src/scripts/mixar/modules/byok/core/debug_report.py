@@ -7,7 +7,12 @@
 import json
 import re
 
-_SECRET_KEYS = re.compile(r"(api.?key|authorization|token|secret|password|cookie)", re.I)
+_SECRET_KEYS = re.compile(
+    r"(?:^|[^a-z0-9])"
+    r"(?:api.?key|authorization|access.?token|refresh.?token|token(?!s)|secret|password|cookie)"
+    r"(?:$|[^a-z0-9])",
+    re.IGNORECASE,
+)
 
 
 def redact(value):

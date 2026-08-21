@@ -8,7 +8,6 @@ Session management operators for Mixie Chat.
 Provides operators for connection management using JSON-RPC WebSocket.
 """
 
-import bpy
 from bpy.types import Operator
 
 from mixar.config.logging_config import get_logger

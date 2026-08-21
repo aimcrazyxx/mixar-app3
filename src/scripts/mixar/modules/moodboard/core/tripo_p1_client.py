@@ -32,24 +32,33 @@ def _image_upload_metadata(image_bytes: bytes, filename: str) -> tuple[str, str]
 def _message(response: httpx.Response) -> str:
     try:
         data = response.json()
-        return str(data.get("message") or data.get("error") or "")[:400]
-    except Exception:
+    except ValueError:
         return response.text[:400]
+    if not isinstance(data, dict):
+        return str(data)[:400]
+    error = data.get("error")
+    if isinstance(error, dict):
+        error = error.get("message") or error.get("code") or error
+    return str(data.get("message") or error or "")[:400]
 
 
 class TripoP1Client:
     def __init__(self, api_key: str, *, timeout=120.0, transport=None):
-        if not str(api_key or "").strip():
+        self._api_key = str(api_key or "").strip()
+        if not self._api_key:
             raise ValueError("Configure a Tripo API key first")
         self._client = httpx.Client(
             base_url=TRIPO_BASE_URL,
-            headers={"Authorization": f"Bearer {api_key.strip()}"},
+            headers={"Authorization": f"Bearer {self._api_key}"},
             timeout=httpx.Timeout(timeout, connect=min(timeout, 15.0)),
             transport=transport,
         )
 
     def close(self):
         self._client.close()
+
+    def _safe_detail(self, value) -> str:
+        return str(value or "").replace(self._api_key, "[REDACTED]")[:400]
 
     def _request(self, method: str, path: str, **kwargs):
         try:
@@ -64,7 +73,7 @@ class TripoP1Client:
                 403: "Tripo access denied",
                 429: "Tripo rate limit reached",
             }
-            detail = _message(response)
+            detail = self._safe_detail(_message(response))
             raise TripoP1Error(
                 f"{labels.get(response.status_code, 'Tripo request failed')}"
                 f"{': ' + detail if detail else ''}"
@@ -76,7 +85,9 @@ class TripoP1Client:
         if not isinstance(body, dict):
             raise TripoP1Error("Tripo returned an unexpected response")
         if isinstance(body, dict) and body.get("code", 0) not in (0, None):
-            raise TripoP1Error(str(body.get("message") or "Tripo returned an error"))
+            raise TripoP1Error(
+                self._safe_detail(body.get("message") or "Tripo returned an error")
+            )
         return body
 
     def upload_image(self, image_bytes: bytes, filename: str) -> str:
@@ -163,7 +174,7 @@ class TripoP1Client:
                 return str(url)
             if status in {"failed", "cancelled", "unknown"}:
                 raise TripoP1Error(
-                    str(
+                    self._safe_detail(
                         data.get("message")
                         or data.get("error")
                         or f"Tripo task {status}"

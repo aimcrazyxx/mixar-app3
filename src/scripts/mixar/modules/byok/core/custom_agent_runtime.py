@@ -146,9 +146,13 @@ def _execute_tool_sync(script: str, timeout: float, cancel_event) -> dict:
     )
 
     done = threading.Event()
+    abandoned = threading.Event()
     holder = {}
 
     def _run():
+        if abandoned.is_set() or cancel_event.is_set():
+            done.set()
+            return
         try:
             holder["result"] = get_executor().execute(script).to_dict()
         except Exception as exc:
@@ -162,9 +166,11 @@ def _execute_tool_sync(script: str, timeout: float, cancel_event) -> dict:
     run_on_main_thread(_run)
     while not done.wait(0.1):
         if cancel_event.is_set():
+            abandoned.set()
             return {"success": False, "error": "Agent run cancelled"}
         timeout -= 0.1
         if timeout <= 0:
+            abandoned.set()
             return {"success": False, "error": "Blender tool execution timed out"}
     return holder.get("result") or {
         "success": False,
@@ -264,7 +270,13 @@ def start(scene, encoded_attachments=None, wire_message: str = "") -> tuple[bool
             _finalize(scene_name, run_id, "", {}, exc)
         finally:
             if provider is not None:
-                provider.close()
+                try:
+                    provider.close()
+                except Exception as exc:
+                    logger.debug(
+                        "Could not close custom provider client: %s",
+                        type(exc).__name__,
+                    )
 
     threading.Thread(
         target=_worker,
@@ -322,8 +334,8 @@ def _finalize(scene_name: str, run_id: str, text: str, debug: dict, error) -> No
     def _apply():
         import bpy
         from mixar.modules.space_mixie_chat.constants import (
-            SessionState,
             TEMP_PLACEHOLDER_PREFIX,
+            SessionState,
         )
         from mixar.modules.space_mixie_chat.core.executor import get_executor
         from mixar.modules.space_mixie_chat.core.message_helpers import (

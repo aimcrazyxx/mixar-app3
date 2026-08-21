@@ -552,6 +552,7 @@ def _on_save_done(success: bool, data, err):
         if success:
             from mixar.modules.common.secure_storage import delete_secret
             wm.byok_custom_enabled = False
+            delete_secret('openai_compatible_api_key')
             delete_secret('openai_compatible_config')
             _apply_cached_state(wm, data or {})
             _wipe_form_secrets(wm)
@@ -857,4 +858,3 @@ classes = (
     MIXAR_BYOK_OT_fetch_state,
     MIXAR_BYOK_OT_fetch_models_catalog,
 )
-

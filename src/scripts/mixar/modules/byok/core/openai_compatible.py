@@ -6,20 +6,30 @@
 
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass, field
 from typing import Callable, Optional
-from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
+from .openai_compatible_parse import (
+    parse_chat_response,
+    parse_chat_stream,
+    parse_responses_response,
+    response_json,
+)
+from .openai_compatible_wire import (
+    endpoint_url,
+    normalize_base_url,
+    parse_custom_headers,
+    responses_input,
+    user_error,
+)
 from .provider_types import (
     AIProvider,
     ProviderCapabilities,
     ProviderError,
     ProviderResponse,
-    ToolCall,
 )
 
 _OPTIONAL_PARAMS = (
@@ -32,108 +42,6 @@ _OPTIONAL_PARAMS = (
     "tools",
     "max_output_tokens",
 )
-
-
-def _responses_input(messages: list[dict]) -> list[dict]:
-    """Translate Chat Completions history into Responses input items."""
-    result = []
-    for message in messages:
-        role = message.get("role")
-        if role == "tool":
-            result.append(
-                {
-                    "type": "function_call_output",
-                    "call_id": str(message.get("tool_call_id") or ""),
-                    "output": str(message.get("content") or ""),
-                }
-            )
-            continue
-        content = message.get("content") or ""
-        if isinstance(content, list):
-            converted = []
-            for part in content:
-                if part.get("type") == "text":
-                    converted.append(
-                        {"type": "input_text", "text": part.get("text", "")}
-                    )
-                elif part.get("type") == "image_url":
-                    image = part.get("image_url") or {}
-                    converted.append(
-                        {"type": "input_image", "image_url": image.get("url", "")}
-                    )
-            content = converted
-        if content:
-            result.append({"role": role, "content": content})
-        for call in message.get("tool_calls") or []:
-            function = call.get("function") or {}
-            result.append(
-                {
-                    "type": "function_call",
-                    "call_id": str(call.get("id") or ""),
-                    "name": str(function.get("name") or ""),
-                    "arguments": str(function.get("arguments") or "{}"),
-                }
-            )
-    return result
-
-
-def normalize_base_url(value: str) -> str:
-    """Return one canonical API root ending in exactly one ``/v1``."""
-    raw = str(value or "").strip()
-    if not raw:
-        raise ValueError("Base URL is required")
-    parts = urlsplit(raw)
-    if parts.scheme not in {"http", "https"} or not parts.netloc:
-        raise ValueError("Base URL must be an http:// or https:// URL")
-    if parts.username is not None or parts.password is not None:
-        raise ValueError("Base URL must not contain credentials")
-    path = re.sub(r"/+", "/", parts.path or "").rstrip("/")
-    path = re.sub(r"(?:/v1)+$", "", path)
-    path += "/v1"
-    return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
-
-
-def endpoint_url(base_url: str, endpoint: str) -> str:
-    return f"{normalize_base_url(base_url)}/{str(endpoint).lstrip('/')}"
-
-
-def parse_custom_headers(value) -> dict[str, str]:
-    if value in (None, "", {}):
-        return {}
-    data = json.loads(value) if isinstance(value, str) else value
-    if not isinstance(data, dict):
-        raise ValueError("Custom headers must be a JSON object")
-    result = {}
-    for key, val in data.items():
-        name = str(key).strip()
-        if not name or "\n" in name or "\r" in name:
-            raise ValueError("Custom header name is invalid")
-        text = str(val)
-        if "\n" in text or "\r" in text:
-            raise ValueError(f"Custom header '{name}' is invalid")
-        result[name] = text
-    return result
-
-
-def user_error(status: int, detail: str = "") -> ProviderError:
-    safe_detail = str(detail or "").replace("\r", " ").replace("\n", " ")[:400]
-    safe_detail = re.sub(r"(?i)bearer\s+\S+", "Bearer [REDACTED]", safe_detail)
-    safe_detail = re.sub(r"(?i)sk-[A-Za-z0-9_-]+", "sk-[REDACTED]", safe_detail)
-    labels = {
-        400: "Provider rejected the request",
-        401: "Invalid API key",
-        403: "Access denied by provider",
-        404: "Endpoint is not supported",
-        408: "Provider request timed out",
-        429: "Provider rate limit reached",
-    }
-    base = labels.get(
-        status,
-        "Provider is unavailable" if status >= 500 else "Provider request failed",
-    )
-    return ProviderError(
-        f"{base}{': ' + safe_detail if safe_detail else ''}", status_code=status
-    )
 
 
 @dataclass
@@ -155,9 +63,27 @@ class OpenAICompatibleConfig:
 
     def __post_init__(self):
         self.base_url = normalize_base_url(self.base_url)
+        self.api_key = str(self.api_key or "").strip()
         self.model = str(self.model or "").strip()
         if not self.model:
             raise ValueError("Model is required")
+        self.timeout = float(self.timeout)
+        self.max_output_tokens = int(self.max_output_tokens)
+        self.context_limit = int(self.context_limit)
+        if self.timeout <= 0:
+            raise ValueError("Timeout must be greater than zero")
+        if self.max_output_tokens < 1:
+            raise ValueError("Max output tokens must be at least 1")
+        if self.context_limit < 0:
+            raise ValueError("Context limit cannot be negative")
+        if self.temperature is not None:
+            self.temperature = float(self.temperature)
+            if not 0 <= self.temperature <= 2:
+                raise ValueError("Temperature must be between 0 and 2")
+        if self.top_p is not None:
+            self.top_p = float(self.top_p)
+            if not 0 <= self.top_p <= 1:
+                raise ValueError("Top P must be between 0 and 1")
         self.custom_headers = parse_custom_headers(self.custom_headers)
         if self.endpoint_mode not in {"auto", "chat_completions", "responses"}:
             raise ValueError("Invalid endpoint mode")
@@ -176,8 +102,12 @@ class OpenAICompatibleProvider(AIProvider):
             supports_responses_api=True,
         )
         headers = dict(config.custom_headers)
-        headers.setdefault("Content-Type", "application/json")
+        if not any(name.lower() == "content-type" for name in headers):
+            headers["Content-Type"] = "application/json"
         if config.api_key:
+            for name in list(headers):
+                if name.lower() == "authorization":
+                    headers.pop(name)
             headers["Authorization"] = f"Bearer {config.api_key}"
         timeout = httpx.Timeout(config.timeout, connect=min(config.timeout, 15.0))
         self._client = httpx.Client(
@@ -204,7 +134,7 @@ class OpenAICompatibleProvider(AIProvider):
                 body = response.json()
                 err = body.get("error", body) if isinstance(body, dict) else body
                 detail = err.get("message", "") if isinstance(err, dict) else str(err)
-            except Exception:
+            except ValueError:
                 detail = response.text[:400]
             raise user_error(response.status_code, self._redact_secrets(detail))
         return response
@@ -220,19 +150,7 @@ class OpenAICompatibleProvider(AIProvider):
 
     @staticmethod
     def _response_json(response: httpx.Response) -> dict:
-        try:
-            body = response.json()
-        except ValueError as exc:
-            raise ProviderError(
-                "Provider returned an invalid JSON response",
-                status_code=response.status_code,
-            ) from exc
-        if not isinstance(body, dict):
-            raise ProviderError(
-                "Provider returned an unexpected JSON response",
-                status_code=response.status_code,
-            )
-        return body
+        return response_json(response)
 
     def list_models(self) -> list[str]:
         response = self._request("GET", "models")
@@ -253,7 +171,7 @@ class OpenAICompatibleProvider(AIProvider):
             if exc.status_code not in {404, 405}:
                 raise
         if self.config.endpoint_mode == "responses":
-            self._request(
+            response = self._request(
                 "POST",
                 "responses",
                 json={
@@ -262,6 +180,7 @@ class OpenAICompatibleProvider(AIProvider):
                     "max_output_tokens": 1,
                 },
             )
+            self._parse_responses_response(response)
         else:
             payload = {
                 "model": self.config.model,
@@ -270,21 +189,26 @@ class OpenAICompatibleProvider(AIProvider):
             }
             try:
                 try:
-                    self._request("POST", "chat/completions", json=payload)
+                    response = self._request(
+                        "POST", "chat/completions", json=payload
+                    )
                 except ProviderError as exc:
                     if exc.status_code != 400 or not self._error_mentions(
                         exc, "max_tokens"
                     ):
                         raise
                     payload["max_completion_tokens"] = payload.pop("max_tokens")
-                    self._request("POST", "chat/completions", json=payload)
+                    response = self._request(
+                        "POST", "chat/completions", json=payload
+                    )
+                self._parse_chat_response(response)
             except ProviderError as exc:
                 if self.config.endpoint_mode != "auto" or exc.status_code not in {
                     404,
                     405,
                 }:
                     raise
-                self._request(
+                response = self._request(
                     "POST",
                     "responses",
                     json={
@@ -293,6 +217,7 @@ class OpenAICompatibleProvider(AIProvider):
                         "max_output_tokens": 1,
                     },
                 )
+                self._parse_responses_response(response)
 
     def _payload(
         self, messages: list[dict], tools: Optional[list[dict]], stream: bool
@@ -347,7 +272,7 @@ class OpenAICompatibleProvider(AIProvider):
                     result = self._generate_stream(payload, on_text_delta)
                 else:
                     result = self._generate_json(payload)
-                result.degraded_parameters = degraded
+                result.degraded_parameters = degraded + result.degraded_parameters
                 return result
             except ProviderError as exc:
                 if self.config.endpoint_mode == "auto" and exc.status_code in {
@@ -394,7 +319,7 @@ class OpenAICompatibleProvider(AIProvider):
     def _generate_responses(self, messages, tools) -> ProviderResponse:
         payload = {
             "model": self.config.model,
-            "input": _responses_input(messages),
+            "input": responses_input(messages),
             "max_output_tokens": self.config.max_output_tokens,
         }
         if tools and self.capabilities.supports_tools:
@@ -426,53 +351,19 @@ class OpenAICompatibleProvider(AIProvider):
                 payload.pop(parameter, None)
                 degraded.append(parameter)
 
-        body = self._response_json(response)
-        text_parts = []
-        calls = []
-        for item in body.get("output") or []:
-            if item.get("type") == "function_call":
-                calls.append(
-                    ToolCall(
-                        str(item.get("call_id") or item.get("id") or ""),
-                        str(item.get("name") or ""),
-                        str(item.get("arguments") or "{}"),
-                    )
-                )
-            if item.get("type") == "message":
-                for part in item.get("content") or []:
-                    if part.get("type") in {"output_text", "text"}:
-                        text_parts.append(str(part.get("text") or ""))
-        return ProviderResponse(
-            content="".join(text_parts),
-            tool_calls=calls,
-            finish_reason=str(body.get("status") or ""),
-            endpoint=endpoint_url(self.config.base_url, "responses"),
-            status_code=response.status_code,
-            usage=body.get("usage") or {},
-            degraded_parameters=degraded,
-        )
+        return self._parse_responses_response(response, degraded)
+
+    def _parse_responses_response(
+        self, response: httpx.Response, degraded=None
+    ) -> ProviderResponse:
+        return parse_responses_response(response, self.config.base_url, degraded)
 
     def _generate_json(self, payload: dict) -> ProviderResponse:
         response = self._request("POST", "chat/completions", json=payload)
-        body = self._response_json(response)
-        choice = (body.get("choices") or [{}])[0]
-        message = choice.get("message") or {}
-        calls = [
-            ToolCall(
-                str(item.get("id") or ""),
-                str((item.get("function") or {}).get("name") or ""),
-                str((item.get("function") or {}).get("arguments") or "{}"),
-            )
-            for item in (message.get("tool_calls") or [])
-        ]
-        return ProviderResponse(
-            content=str(message.get("content") or ""),
-            tool_calls=calls,
-            finish_reason=str(choice.get("finish_reason") or ""),
-            endpoint=endpoint_url(self.config.base_url, "chat/completions"),
-            status_code=response.status_code,
-            usage=body.get("usage") or {},
-        )
+        return self._parse_chat_response(response)
+
+    def _parse_chat_response(self, response: httpx.Response) -> ProviderResponse:
+        return parse_chat_response(response, self.config.base_url)
 
     def _generate_stream(
         self, payload: dict, on_text_delta: Optional[Callable[[str], None]]
@@ -494,47 +385,17 @@ class OpenAICompatibleProvider(AIProvider):
                         response.status_code,
                         self._redact_secrets(detail),
                     )
-                content, finish, usage = [], "", {}
-                calls: dict[int, dict] = {}
-                for line in response.iter_lines():
-                    if not line or not line.startswith("data:"):
-                        continue
-                    raw = line[5:].strip()
-                    if raw == "[DONE]":
-                        break
-                    try:
-                        event = json.loads(raw)
-                    except json.JSONDecodeError:
-                        continue
-                    if event.get("usage"):
-                        usage = event["usage"]
-                    for choice in event.get("choices") or []:
-                        finish = choice.get("finish_reason") or finish
-                        delta = choice.get("delta") or {}
-                        text = delta.get("content") or ""
-                        if text:
-                            content.append(text)
-                            if on_text_delta:
-                                on_text_delta(text)
-                        for item in delta.get("tool_calls") or []:
-                            idx = int(item.get("index", 0))
-                            slot = calls.setdefault(
-                                idx, {"id": "", "name": "", "arguments": ""}
-                            )
-                            slot["id"] += str(item.get("id") or "")
-                            fn = item.get("function") or {}
-                            slot["name"] += str(fn.get("name") or "")
-                            slot["arguments"] += str(fn.get("arguments") or "")
-                return ProviderResponse(
-                    content="".join(content),
-                    tool_calls=[
-                        ToolCall(v["id"], v["name"], v["arguments"])
-                        for _, v in sorted(calls.items())
-                    ],
-                    finish_reason=str(finish),
-                    endpoint=url,
-                    status_code=response.status_code,
-                    usage=usage,
+                content_type = response.headers.get("content-type", "").lower()
+                if "application/json" in content_type:
+                    response.read()
+                    result = self._parse_chat_response(response)
+                    result.degraded_parameters = ["streaming"]
+                    return result
+                return parse_chat_stream(
+                    response,
+                    url,
+                    on_text_delta,
+                    redact_detail=self._redact_secrets,
                 )
         except httpx.TimeoutException as exc:
             raise ProviderError("Connection timed out", category="timeout") from exc

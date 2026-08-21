@@ -38,7 +38,7 @@ from ...core.queue_processor import (
 )
 from ...core.sse_handler import create_sse_handler
 from ...core.animation_manager import start_loader_animation
-from ...core.message_helpers import add_agent_message, get_auth_token
+from ...core.message_helpers import get_auth_token
 from ...core.rules import compose_wire_message, mark_rules_sent
 from ...core.ui_utils import redraw_chat_areas
 from . import generate_ops
@@ -338,7 +338,7 @@ class MIXIE_CHAT_OT_send_message(Operator):
                     ).startswith(TEMP_PLACEHOLDER_PREFIX):
                         scene.mixie_chat_messages.remove(index)
                 self.report({'ERROR'}, error or "Failed to start custom provider")
-                session.set_error(scene)
+                session.set_connected(scene)
                 redraw_chat_areas()
                 metrics.stop_timer('send_message_total')
                 return {'CANCELLED'}

@@ -3,14 +3,15 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 import json
+import sys
 import threading
-from types import SimpleNamespace
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
 
 import httpx
 import pytest
-
-from mixar.modules.byok.core.agent_loop import run_agent_loop, trim_context
 from mixar.modules.byok.core import custom_agent_runtime
+from mixar.modules.byok.core.agent_loop import run_agent_loop, trim_context
 from mixar.modules.byok.core.debug_report import to_json as debug_to_json
 from mixar.modules.byok.core.openai_compatible import (
     OpenAICompatibleConfig,
@@ -51,6 +52,36 @@ def test_base_url_rejects_embedded_credentials():
 def test_custom_headers_reject_newlines():
     with pytest.raises(ValueError):
         parse_custom_headers('{"X-Test":"ok\\nBearer secret"}')
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"Bad Header": "value"},
+        {"X-Test": "value\x00"},
+        {"X-Test": "não-ascii"},
+    ],
+)
+def test_custom_headers_reject_invalid_http_characters(headers):
+    with pytest.raises(ValueError):
+        parse_custom_headers(headers)
+
+
+@pytest.mark.parametrize(
+    "kwargs, message",
+    [
+        ({"timeout": 0}, "Timeout"),
+        ({"max_output_tokens": 0}, "Max output"),
+        ({"context_limit": -1}, "Context"),
+        ({"temperature": 2.1}, "Temperature"),
+        ({"top_p": 1.1}, "Top P"),
+    ],
+)
+def test_config_rejects_invalid_numeric_limits(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        OpenAICompatibleConfig(
+            "https://api.example.test", "key", "model", **kwargs
+        )
 
 
 def test_list_models_and_parameter_fallback_are_conservative():
@@ -256,6 +287,30 @@ def test_chat_falls_back_to_non_streaming_when_stream_is_rejected():
     assert result.degraded_parameters == ["streaming"]
 
 
+def test_stream_request_accepts_json_response_from_compatible_provider():
+    provider = OpenAICompatibleProvider(
+        OpenAICompatibleConfig("https://api.example.test", "key", "model"),
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                headers={"content-type": "application/json"},
+                json={
+                    "choices": [
+                        {"message": {"content": "json fallback"}, "finish_reason": "stop"}
+                    ]
+                },
+            )
+        ),
+    )
+    try:
+        result = provider.generate([{"role": "user", "content": "hello"}])
+    finally:
+        provider.close()
+
+    assert result.content == "json fallback"
+    assert result.degraded_parameters == ["streaming"]
+
+
 def test_streaming_reassembles_text_and_fragmented_tool_call():
     deltas = []
     events = [
@@ -382,6 +437,36 @@ def test_exact_model_auth_custom_headers_vision_and_reasoning_reach_provider():
     assert seen["body"]["messages"] == messages
 
 
+def test_api_key_overrides_case_variant_custom_authorization_header():
+    seen = {}
+
+    def handler(request):
+        seen["authorization"] = request.headers.get("authorization")
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]
+            },
+        )
+
+    provider = OpenAICompatibleProvider(
+        OpenAICompatibleConfig(
+            "https://api.example.test",
+            "  exact-key  ",
+            "model",
+            custom_headers={"authorization": "Bearer stale-key"},
+            streaming=False,
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        provider.generate([{"role": "user", "content": "hello"}])
+    finally:
+        provider.close()
+
+    assert seen["authorization"] == "Bearer exact-key"
+
+
 def test_connection_works_when_models_endpoint_is_missing():
     paths = []
 
@@ -406,6 +491,29 @@ def test_connection_works_when_models_endpoint_is_missing():
         provider.close()
 
     assert paths == ["/v1/models", "/v1/chat/completions"]
+
+
+@pytest.mark.parametrize("endpoint_mode", ["auto", "responses"])
+def test_connection_rejects_unrecognized_success_payload(endpoint_mode):
+    def handler(request):
+        if request.url.path.endswith("/models"):
+            return httpx.Response(404, json={"error": {"message": "missing"}})
+        return httpx.Response(200, json={"unexpected": True})
+
+    provider = OpenAICompatibleProvider(
+        OpenAICompatibleConfig(
+            "https://api.example.test",
+            "key",
+            "model",
+            endpoint_mode=endpoint_mode,
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with pytest.raises(ProviderError, match=r"choice|output"):
+            provider.test_connection()
+    finally:
+        provider.close()
 
 
 @pytest.mark.parametrize(
@@ -471,6 +579,84 @@ def test_success_with_invalid_json_is_reported_as_provider_error():
         provider.close()
 
 
+def test_malformed_chat_tool_function_is_reported_as_provider_error():
+    provider = OpenAICompatibleProvider(
+        OpenAICompatibleConfig(
+            "https://api.example.test", "key", "model", streaming=False
+        ),
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "",
+                                "tool_calls": [{"id": "one", "function": "bad"}],
+                            }
+                        }
+                    ]
+                },
+            )
+        ),
+    )
+    try:
+        with pytest.raises(ProviderError, match="tool function"):
+            provider.generate([{"role": "user", "content": "hello"}])
+    finally:
+        provider.close()
+
+
+@pytest.mark.parametrize(
+    "content, message",
+    [
+        (b"data: [DONE]\n\n", "empty streaming"),
+        (b"data: {}\n\ndata: [DONE]\n\n", "empty streaming"),
+        (b"data: not-json\n\n", "malformed streaming"),
+    ],
+)
+def test_invalid_stream_is_not_accepted_as_an_empty_success(content, message):
+    provider = OpenAICompatibleProvider(
+        OpenAICompatibleConfig("https://api.example.test", "key", "model"),
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=content,
+            )
+        ),
+    )
+    try:
+        with pytest.raises(ProviderError, match=message):
+            provider.generate([{"role": "user", "content": "hello"}])
+    finally:
+        provider.close()
+
+
+def test_stream_error_redacts_provider_secret():
+    secret = "provider-secret-123"
+    event = {"error": {"message": f"Credential {secret} is invalid"}}
+    content = f"data: {json.dumps(event)}\n\n".encode()
+    provider = OpenAICompatibleProvider(
+        OpenAICompatibleConfig("https://api.example.test", secret, "model"),
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=content,
+            )
+        ),
+    )
+    try:
+        with pytest.raises(ProviderError) as error:
+            provider.generate([{"role": "user", "content": "hello"}])
+    finally:
+        provider.close()
+
+    assert secret not in str(error.value)
+    assert "[REDACTED]" in str(error.value)
+
+
 def test_context_trim_keeps_contiguous_recent_history_and_tool_group():
     messages = [
         {"role": "system", "content": "system"},
@@ -508,6 +694,24 @@ def test_debug_report_redacts_nested_secrets():
     assert "sk-123456789-secret" not in report
 
 
+def test_debug_report_keeps_non_secret_token_counts():
+    report = debug_to_json({"context_tokens_approx": 321, "access_token": "secret"})
+
+    assert '"context_tokens_approx": 321' in report
+    assert '"access_token": "[REDACTED]"' in report
+
+
+def test_compatible_provider_modules_respect_project_line_limit():
+    core = Path(__file__).parents[1] / "src/scripts/mixar/modules/byok/core"
+
+    for filename in (
+        "openai_compatible.py",
+        "openai_compatible_parse.py",
+        "openai_compatible_wire.py",
+    ):
+        assert len((core / filename).read_text(encoding="utf-8").splitlines()) <= 500
+
+
 def test_stale_agent_finalizer_cannot_clear_newer_run_state():
     scene_name = "Scene-Race-Test"
     event = threading.Event()
@@ -528,6 +732,32 @@ def test_stale_agent_finalizer_cannot_clear_newer_run_state():
         custom_agent_runtime._active_runs.pop(scene_name, None)
         custom_agent_runtime._cancel_events.pop(scene_name, None)
         custom_agent_runtime._stream_buffers.pop("new-run", None)
+
+
+def test_timed_out_queued_blender_tool_is_not_executed_later(monkeypatch):
+    scheduled = []
+    executions = []
+    executor_module = ModuleType("mixar.modules.space_mixie_chat.core.executor")
+    executor_module.get_executor = lambda: SimpleNamespace(
+        execute=lambda script: executions.append(script)
+    )
+    main_thread_module = ModuleType(
+        "mixar.modules.space_mixie_chat.core.main_thread_executor"
+    )
+    main_thread_module.run_on_main_thread = scheduled.append
+    monkeypatch.setitem(sys.modules, executor_module.__name__, executor_module)
+    monkeypatch.setitem(sys.modules, main_thread_module.__name__, main_thread_module)
+
+    result = custom_agent_runtime._execute_tool_sync(
+        "must_not_run", 0.01, threading.Event()
+    )
+    scheduled[0]()
+
+    assert result == {
+        "success": False,
+        "error": "Blender tool execution timed out",
+    }
+    assert executions == []
 
 
 class FakeProvider:
@@ -598,3 +828,27 @@ def test_agent_runs_three_iterations_multiple_tools_and_recovers_from_error():
     ]
     tool_messages = [m for m in result.messages if m.get("role") == "tool"]
     assert "boom" in tool_messages[0]["content"]
+
+
+def test_agent_synthesizes_missing_tool_call_id():
+    provider = FakeProvider(
+        [
+            ProviderResponse(
+                tool_calls=[
+                    ToolCall("", "execute_blender_python", '{"script":"inspect"}')
+                ]
+            ),
+            ProviderResponse(content="done", finish_reason="stop"),
+        ]
+    )
+
+    result = run_agent_loop(
+        provider,
+        [{"role": "user", "content": "inspect"}],
+        lambda _name, _args: {"success": True},
+    )
+
+    assistant = next(message for message in result.messages if message.get("tool_calls"))
+    tool = next(message for message in result.messages if message.get("role") == "tool")
+    assert assistant["tool_calls"][0]["id"] == "call_1_0"
+    assert tool["tool_call_id"] == "call_1_0"

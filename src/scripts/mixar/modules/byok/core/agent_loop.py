@@ -69,7 +69,7 @@ def trim_context(messages: list[dict], limit: int) -> list[dict]:
             groups.append([message])
     kept_groups = groups[-1:]  # current request is never dropped
     for group in reversed(groups[:-1]):
-        candidate_groups = [group] + kept_groups
+        candidate_groups = [group, *kept_groups]
         candidate = system + [item for block in candidate_groups for item in block]
         if approximate_tokens(candidate, []) > limit:
             # Keep one contiguous recent suffix. Skipping this group and then
@@ -142,6 +142,9 @@ def run_agent_loop(
                     "degraded_parameters": response.degraded_parameters,
                 }
             )
+            for call_index, call in enumerate(response.tool_calls):
+                if not call.id:
+                    call.id = f"call_{iteration}_{call_index}"
             transcript.append(_assistant_wire(response))
             if not response.tool_calls:
                 final_text = response.content.strip()

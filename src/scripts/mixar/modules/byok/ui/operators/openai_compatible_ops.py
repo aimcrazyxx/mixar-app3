@@ -9,7 +9,6 @@ import threading
 
 import bpy
 from bpy.types import Operator
-
 from mixar.config.logging_config import get_logger
 from mixar.modules.common.secure_storage import (
     delete_secret,

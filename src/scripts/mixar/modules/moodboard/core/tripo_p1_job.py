@@ -4,8 +4,8 @@
 
 """Direct BYOK Tripo P1 job that rejoins Mixar's normal GLB import queue."""
 
-from dataclasses import dataclass, field
 import threading
+from dataclasses import dataclass, field
 
 from mixar.modules.common.api.response import APIResponse
 from mixar.modules.common.job_queue import Job, JobState
