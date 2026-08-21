@@ -72,7 +72,10 @@ def trim_context(messages: list[dict], limit: int) -> list[dict]:
         candidate_groups = [group] + kept_groups
         candidate = system + [item for block in candidate_groups for item in block]
         if approximate_tokens(candidate, []) > limit:
-            continue
+            # Keep one contiguous recent suffix. Skipping this group and then
+            # accepting an older, smaller one would reorder the conversation's
+            # effective meaning and could separate a request from its answer.
+            break
         kept_groups.insert(0, group)
     return system + [item for block in kept_groups for item in block]
 
@@ -131,12 +134,14 @@ def run_agent_loop(
                 tools=tools or None,
                 on_text_delta=on_text_delta,
             )
-            debug.update({
-                "endpoint": response.endpoint,
-                "http_status": response.status_code,
-                "finish_reason": response.finish_reason,
-                "degraded_parameters": response.degraded_parameters,
-            })
+            debug.update(
+                {
+                    "endpoint": response.endpoint,
+                    "http_status": response.status_code,
+                    "finish_reason": response.finish_reason,
+                    "degraded_parameters": response.degraded_parameters,
+                }
+            )
             transcript.append(_assistant_wire(response))
             if not response.tool_calls:
                 final_text = response.content.strip()
@@ -151,25 +156,45 @@ def run_agent_loop(
                 try:
                     args = json.loads(call.arguments or "{}")
                     if call.name != "execute_blender_python":
-                        result = {"success": False, "error": f"Unknown tool: {call.name}"}
-                    elif not isinstance(args, dict) or not isinstance(args.get("script"), str):
-                        result = {"success": False, "error": "Tool argument 'script' must be a string"}
+                        result = {
+                            "success": False,
+                            "error": f"Unknown tool: {call.name}",
+                        }
+                    elif not isinstance(args, dict) or not isinstance(
+                        args.get("script"), str
+                    ):
+                        result = {
+                            "success": False,
+                            "error": "Tool argument 'script' must be a string",
+                        }
                     else:
                         result = execute_tool(call.name, args)
                 except json.JSONDecodeError as exc:
-                    result = {"success": False, "error": f"Invalid tool JSON: {exc.msg}"}
+                    result = {
+                        "success": False,
+                        "error": f"Invalid tool JSON: {exc.msg}",
+                    }
                 except Exception as exc:
-                    result = {"success": False, "error": f"Tool execution failed: {type(exc).__name__}: {exc}"}
-                debug["tool_results"].append({
-                    "iteration": iteration,
-                    "name": call.name,
-                    "success": bool(result.get("success")) if isinstance(result, dict) else False,
-                })
-                transcript.append({
-                    "role": "tool",
-                    "tool_call_id": call.id,
-                    "content": json.dumps(result, ensure_ascii=False, default=str),
-                })
+                    result = {
+                        "success": False,
+                        "error": f"Tool execution failed: {type(exc).__name__}: {exc}",
+                    }
+                debug["tool_results"].append(
+                    {
+                        "iteration": iteration,
+                        "name": call.name,
+                        "success": bool(result.get("success"))
+                        if isinstance(result, dict)
+                        else False,
+                    }
+                )
+                transcript.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": json.dumps(result, ensure_ascii=False, default=str),
+                    }
+                )
         else:
             final_text = f"Stopped after {max_iterations} agent iterations before a final answer."
     finally:

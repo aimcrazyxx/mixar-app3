@@ -72,8 +72,12 @@ def _routing(service_key):
         svc = get_service(service_key)
         if svc and svc.get("feature_key"):
             feature_key = svc["feature_key"]
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug(
+            "Could not resolve catalog feature for %s: %s",
+            service_key,
+            type(exc).__name__,
+        )
     return dict(
         feature_key=feature_key,
         scene_flag="mixie_image_to_3d_is_generating",
@@ -390,3 +394,4 @@ def unregister():
     from bpy.utils import unregister_class
     for cls in reversed(classes):
         unregister_class(cls)
+

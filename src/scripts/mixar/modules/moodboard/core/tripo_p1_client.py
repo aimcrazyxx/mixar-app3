@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import time
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -16,6 +17,16 @@ TRIPO_P1_MODEL = "P1-20260311"
 
 class TripoP1Error(RuntimeError):
     pass
+
+
+def _image_upload_metadata(image_bytes: bytes, filename: str) -> tuple[str, str]:
+    """Return a filename/MIME pair that agrees with the actual bytes."""
+    base = str(filename or "image").rsplit(".", 1)[0] or "image"
+    if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        return f"{base}.png", "image/png"
+    if image_bytes.startswith(b"\xff\xd8\xff"):
+        return f"{base}.jpg", "image/jpeg"
+    raise ValueError(f"{filename or 'image'} must contain PNG or JPEG data")
 
 
 def _message(response: httpx.Response) -> str:
@@ -58,7 +69,12 @@ class TripoP1Client:
                 f"{labels.get(response.status_code, 'Tripo request failed')}"
                 f"{': ' + detail if detail else ''}"
             )
-        body = response.json()
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise TripoP1Error("Tripo returned an invalid JSON response") from exc
+        if not isinstance(body, dict):
+            raise TripoP1Error("Tripo returned an unexpected response")
         if isinstance(body, dict) and body.get("code", 0) not in (0, None):
             raise TripoP1Error(str(body.get("message") or "Tripo returned an error"))
         return body
@@ -68,9 +84,11 @@ class TripoP1Client:
             raise ValueError(f"{filename} is empty")
         if len(image_bytes) > 20 * 1024 * 1024:
             raise ValueError(f"{filename} exceeds Tripo's 20 MB image limit")
+        upload_name, media_type = _image_upload_metadata(image_bytes, filename)
         body = self._request(
-            "POST", "/files",
-            files={"file": (filename, image_bytes, "image/png")},
+            "POST",
+            "/files",
+            files={"file": (upload_name, image_bytes, media_type)},
         )
         token = (body.get("data") or {}).get("file_token")
         if not token:
@@ -78,8 +96,13 @@ class TripoP1Client:
         return str(token)
 
     def create_multiview_task(
-        self, tokens: dict[str, str], *, texture=True, pbr=True,
-        face_limit=0, model_seed=0,
+        self,
+        tokens: dict[str, str],
+        *,
+        texture=True,
+        pbr=True,
+        face_limit=0,
+        model_seed=0,
     ) -> str:
         clean = {key: value for key, value in tokens.items() if value}
         if "front" not in clean:
@@ -87,7 +110,11 @@ class TripoP1Client:
         if len(clean) < 2:
             raise ValueError("Tripo P1 requires front plus at least one other view")
         payload = {
-            "inputs": [{view: clean[view]} for view in ("front", "left", "back", "right") if view in clean],
+            "inputs": [
+                {view: clean[view]}
+                for view in ("front", "left", "back", "right")
+                if view in clean
+            ],
             "model": TRIPO_P1_MODEL,
             "texture": bool(texture or pbr),
             "pbr": bool(pbr),
@@ -105,7 +132,12 @@ class TripoP1Client:
         return str(task_id)
 
     def wait_for_model(
-        self, task_id: str, *, should_cancel=None, interval=2.0, max_wait=1800.0,
+        self,
+        task_id: str,
+        *,
+        should_cancel=None,
+        interval=2.0,
+        max_wait=1800.0,
     ) -> str:
         deadline = time.monotonic() + max(1.0, float(max_wait))
         while True:
@@ -120,7 +152,21 @@ class TripoP1Client:
                 url = (data.get("output") or {}).get("model_url")
                 if not url:
                     raise TripoP1Error("Tripo task succeeded without a model URL")
+                parts = urlsplit(str(url))
+                if (
+                    parts.scheme != "https"
+                    or not parts.netloc
+                    or parts.username is not None
+                    or parts.password is not None
+                ):
+                    raise TripoP1Error("Tripo returned an invalid model download URL")
                 return str(url)
             if status in {"failed", "cancelled", "unknown"}:
-                raise TripoP1Error(str(data.get("message") or data.get("error") or f"Tripo task {status}"))
+                raise TripoP1Error(
+                    str(
+                        data.get("message")
+                        or data.get("error")
+                        or f"Tripo task {status}"
+                    )
+                )
             time.sleep(max(0.05, float(interval)))

@@ -21,6 +21,8 @@ import json
 import bpy
 from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, StringProperty
 
+from mixar.config.logging_config import get_logger
+
 from ...constants import (
     BYOK_API_KEY_MAX_LENGTH,
     CODEX_DEFAULT_MODEL,
@@ -31,6 +33,8 @@ from ...constants import (
 )
 from ...core import custom_model_cache
 from ...core.model_suggestions import get_model_items, get_provider_items
+
+logger = get_logger(__name__)
 
 
 def _provider_items(self, context):
@@ -65,8 +69,8 @@ def _provider_changed(self, context):
         # item callback.  Select the first real model for the new provider, or
         # the NONE sentinel only when that is what the callback exposes.
         wm.byok_form_model = items[0][0] if items else 'NONE'
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Could not reset BYOK model selection: %s", type(exc).__name__)
 
 
 def _custom_model_items(self, context):
@@ -88,8 +92,12 @@ def wipe_transient_secrets(wm) -> None:
     ):
         try:
             setattr(wm, attr, '')
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(
+                "Could not wipe transient BYOK field %s: %s",
+                attr,
+                type(exc).__name__,
+            )
 
 
 _WM_ATTRS = (
@@ -317,8 +325,11 @@ def register():
             wm.byok_current_model = wm.byok_custom_model
             wm.byok_key_preview = masked_preview(
                 get_secret('openai_compatible_api_key'))
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "Could not restore custom provider configuration: %s",
+                type(exc).__name__,
+            )
         return None
 
     bpy.app.timers.register(_restore_custom_provider, first_interval=0.0)
@@ -333,12 +344,12 @@ def unregister():
     candidates = []
     try:
         candidates.extend(list(bpy.data.window_managers))
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Could not enumerate WindowManagers: %s", type(exc).__name__)
     try:
         candidates.append(bpy.context.window_manager)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Could not access active WindowManager: %s", type(exc).__name__)
     for wm in candidates:
         marker = id(wm)
         if marker not in seen:
@@ -348,4 +359,5 @@ def unregister():
         try:
             delattr(WM, attr)
         except AttributeError:
-            pass
+            logger.debug("BYOK property already absent during unregister: %s", attr)
+

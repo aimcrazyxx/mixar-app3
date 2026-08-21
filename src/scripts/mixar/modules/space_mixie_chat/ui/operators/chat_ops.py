@@ -332,8 +332,14 @@ class MIXIE_CHAT_OT_send_message(Operator):
                 scene, encoded_attachments, wire_message=wire_message,
             )
             if not success:
+                for index in range(len(scene.mixie_chat_messages) - 1, -1, -1):
+                    if str(
+                        getattr(scene.mixie_chat_messages[index], "bubble_id", "")
+                    ).startswith(TEMP_PLACEHOLDER_PREFIX):
+                        scene.mixie_chat_messages.remove(index)
                 self.report({'ERROR'}, error or "Failed to start custom provider")
                 session.set_error(scene)
+                redraw_chat_areas()
                 metrics.stop_timer('send_message_total')
                 return {'CANCELLED'}
             mark_rules_sent(scene)

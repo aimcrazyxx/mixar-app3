@@ -63,8 +63,12 @@ def _wipe_form_secrets(wm):
     ):
         try:
             setattr(wm, attr, '')
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(
+                "Could not wipe transient BYOK field %s: %s",
+                attr,
+                type(exc).__name__,
+            )
 
 
 def _apply_cached_state(wm, data):
@@ -853,3 +857,4 @@ classes = (
     MIXAR_BYOK_OT_fetch_state,
     MIXAR_BYOK_OT_fetch_models_catalog,
 )
+

@@ -23,8 +23,14 @@ from .provider_types import (
 )
 
 _OPTIONAL_PARAMS = (
-    "parallel_tool_calls", "reasoning_effort", "stream_options",
-    "reasoning", "temperature", "top_p", "tools",
+    "parallel_tool_calls",
+    "reasoning_effort",
+    "stream_options",
+    "reasoning",
+    "temperature",
+    "top_p",
+    "tools",
+    "max_output_tokens",
 )
 
 
@@ -34,32 +40,40 @@ def _responses_input(messages: list[dict]) -> list[dict]:
     for message in messages:
         role = message.get("role")
         if role == "tool":
-            result.append({
-                "type": "function_call_output",
-                "call_id": str(message.get("tool_call_id") or ""),
-                "output": str(message.get("content") or ""),
-            })
+            result.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": str(message.get("tool_call_id") or ""),
+                    "output": str(message.get("content") or ""),
+                }
+            )
             continue
         content = message.get("content") or ""
         if isinstance(content, list):
             converted = []
             for part in content:
                 if part.get("type") == "text":
-                    converted.append({"type": "input_text", "text": part.get("text", "")})
+                    converted.append(
+                        {"type": "input_text", "text": part.get("text", "")}
+                    )
                 elif part.get("type") == "image_url":
                     image = part.get("image_url") or {}
-                    converted.append({"type": "input_image", "image_url": image.get("url", "")})
+                    converted.append(
+                        {"type": "input_image", "image_url": image.get("url", "")}
+                    )
             content = converted
         if content:
             result.append({"role": role, "content": content})
         for call in message.get("tool_calls") or []:
             function = call.get("function") or {}
-            result.append({
-                "type": "function_call",
-                "call_id": str(call.get("id") or ""),
-                "name": str(function.get("name") or ""),
-                "arguments": str(function.get("arguments") or "{}"),
-            })
+            result.append(
+                {
+                    "type": "function_call",
+                    "call_id": str(call.get("id") or ""),
+                    "name": str(function.get("name") or ""),
+                    "arguments": str(function.get("arguments") or "{}"),
+                }
+            )
     return result
 
 
@@ -71,9 +85,11 @@ def normalize_base_url(value: str) -> str:
     parts = urlsplit(raw)
     if parts.scheme not in {"http", "https"} or not parts.netloc:
         raise ValueError("Base URL must be an http:// or https:// URL")
+    if parts.username is not None or parts.password is not None:
+        raise ValueError("Base URL must not contain credentials")
     path = re.sub(r"/+", "/", parts.path or "").rstrip("/")
-    if not path.endswith("/v1"):
-        path += "/v1"
+    path = re.sub(r"(?:/v1)+$", "", path)
+    path += "/v1"
     return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
 
 
@@ -111,8 +127,13 @@ def user_error(status: int, detail: str = "") -> ProviderError:
         408: "Provider request timed out",
         429: "Provider rate limit reached",
     }
-    base = labels.get(status, "Provider is unavailable" if status >= 500 else "Provider request failed")
-    return ProviderError(f"{base}{': ' + safe_detail if safe_detail else ''}", status_code=status)
+    base = labels.get(
+        status,
+        "Provider is unavailable" if status >= 500 else "Provider request failed",
+    )
+    return ProviderError(
+        f"{base}{': ' + safe_detail if safe_detail else ''}", status_code=status
+    )
 
 
 @dataclass
@@ -148,7 +169,9 @@ class OpenAICompatibleProvider(AIProvider):
         self.capabilities = ProviderCapabilities(
             supports_tools=config.tool_calling,
             supports_vision=config.vision,
-            supports_streaming=config.streaming,
+            supports_streaming=(
+                config.streaming and config.endpoint_mode != "responses"
+            ),
             supports_reasoning=bool(config.reasoning_effort),
             supports_responses_api=True,
         )
@@ -157,18 +180,24 @@ class OpenAICompatibleProvider(AIProvider):
         if config.api_key:
             headers["Authorization"] = f"Bearer {config.api_key}"
         timeout = httpx.Timeout(config.timeout, connect=min(config.timeout, 15.0))
-        self._client = httpx.Client(headers=headers, timeout=timeout, transport=transport)
+        self._client = httpx.Client(
+            headers=headers, timeout=timeout, transport=transport
+        )
 
     def close(self) -> None:
         self._client.close()
 
     def _request(self, method: str, endpoint: str, **kwargs) -> httpx.Response:
         try:
-            response = self._client.request(method, endpoint_url(self.config.base_url, endpoint), **kwargs)
+            response = self._client.request(
+                method, endpoint_url(self.config.base_url, endpoint), **kwargs
+            )
         except httpx.TimeoutException as exc:
             raise ProviderError("Connection timed out", category="timeout") from exc
         except httpx.HTTPError as exc:
-            raise ProviderError(f"Connection failed: {type(exc).__name__}", category="connection") from exc
+            raise ProviderError(
+                f"Connection failed: {type(exc).__name__}", category="connection"
+            ) from exc
         if response.status_code >= 400:
             detail = ""
             try:
@@ -177,38 +206,97 @@ class OpenAICompatibleProvider(AIProvider):
                 detail = err.get("message", "") if isinstance(err, dict) else str(err)
             except Exception:
                 detail = response.text[:400]
-            raise user_error(response.status_code, detail)
+            raise user_error(response.status_code, self._redact_secrets(detail))
         return response
+
+    def _redact_secrets(self, detail: str) -> str:
+        safe = str(detail or "")
+        candidates = [self.config.api_key, *self.config.custom_headers.values()]
+        for value in candidates:
+            secret = str(value or "")
+            if len(secret) >= 4:
+                safe = safe.replace(secret, "[REDACTED]")
+        return safe
+
+    @staticmethod
+    def _response_json(response: httpx.Response) -> dict:
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise ProviderError(
+                "Provider returned an invalid JSON response",
+                status_code=response.status_code,
+            ) from exc
+        if not isinstance(body, dict):
+            raise ProviderError(
+                "Provider returned an unexpected JSON response",
+                status_code=response.status_code,
+            )
+        return body
 
     def list_models(self) -> list[str]:
         response = self._request("GET", "models")
-        data = response.json()
-        rows = data.get("data", []) if isinstance(data, dict) else []
-        return sorted({str(row.get("id")) for row in rows if isinstance(row, dict) and row.get("id")})
+        data = self._response_json(response)
+        rows = data.get("data", [])
+        return sorted(
+            {
+                str(row.get("id"))
+                for row in rows
+                if isinstance(row, dict) and row.get("id")
+            }
+        )
 
     def test_connection(self) -> None:
         try:
             self.list_models()
-            return
         except ProviderError as exc:
             if exc.status_code not in {404, 405}:
                 raise
         if self.config.endpoint_mode == "responses":
-            self._request("POST", "responses", json={
-                "model": self.config.model, "input": "Reply OK", "max_output_tokens": 1,
-            })
+            self._request(
+                "POST",
+                "responses",
+                json={
+                    "model": self.config.model,
+                    "input": "Reply OK",
+                    "max_output_tokens": 1,
+                },
+            )
         else:
-            payload = {"model": self.config.model, "messages": [{"role": "user", "content": "Reply OK"}], "max_tokens": 1}
+            payload = {
+                "model": self.config.model,
+                "messages": [{"role": "user", "content": "Reply OK"}],
+                "max_tokens": 1,
+            }
             try:
-                self._request("POST", "chat/completions", json=payload)
+                try:
+                    self._request("POST", "chat/completions", json=payload)
+                except ProviderError as exc:
+                    if exc.status_code != 400 or not self._error_mentions(
+                        exc, "max_tokens"
+                    ):
+                        raise
+                    payload["max_completion_tokens"] = payload.pop("max_tokens")
+                    self._request("POST", "chat/completions", json=payload)
             except ProviderError as exc:
-                if self.config.endpoint_mode != "auto" or exc.status_code not in {404, 405}:
+                if self.config.endpoint_mode != "auto" or exc.status_code not in {
+                    404,
+                    405,
+                }:
                     raise
-                self._request("POST", "responses", json={
-                    "model": self.config.model, "input": "Reply OK", "max_output_tokens": 1,
-                })
+                self._request(
+                    "POST",
+                    "responses",
+                    json={
+                        "model": self.config.model,
+                        "input": "Reply OK",
+                        "max_output_tokens": 1,
+                    },
+                )
 
-    def _payload(self, messages: list[dict], tools: Optional[list[dict]], stream: bool) -> dict:
+    def _payload(
+        self, messages: list[dict], tools: Optional[list[dict]], stream: bool
+    ) -> dict:
         payload = {
             "model": self.config.model,
             "messages": messages,
@@ -237,12 +325,22 @@ class OpenAICompatibleProvider(AIProvider):
                 return name
         return ""
 
+    @staticmethod
+    def _error_mentions(error: ProviderError, parameter: str) -> bool:
+        return bool(
+            re.search(
+                rf"\b{re.escape(parameter.lower())}\b",
+                str(error).lower(),
+            )
+        )
+
     def generate(self, messages, *, tools=None, on_text_delta=None) -> ProviderResponse:
         if self.config.endpoint_mode == "responses":
             return self._generate_responses(messages, tools)
         stream = bool(self.config.streaming)
         payload = self._payload(messages, tools, stream)
         degraded = []
+        swapped_token_parameter = False
         while True:
             try:
                 if stream:
@@ -252,11 +350,38 @@ class OpenAICompatibleProvider(AIProvider):
                 result.degraded_parameters = degraded
                 return result
             except ProviderError as exc:
-                if self.config.endpoint_mode == "auto" and exc.status_code in {404, 405}:
+                if self.config.endpoint_mode == "auto" and exc.status_code in {
+                    404,
+                    405,
+                }:
                     result = self._generate_responses(messages, tools)
-                    result.degraded_parameters = degraded
+                    result.degraded_parameters = degraded + result.degraded_parameters
                     return result
-                param = self._unsupported_parameter(exc, payload) if exc.status_code == 400 else ""
+                if (
+                    exc.status_code == 400
+                    and "max_tokens" in payload
+                    and not swapped_token_parameter
+                    and self._error_mentions(exc, "max_tokens")
+                ):
+                    payload["max_completion_tokens"] = payload.pop("max_tokens")
+                    degraded.append("max_tokens->max_completion_tokens")
+                    swapped_token_parameter = True
+                    continue
+                if (
+                    exc.status_code == 400
+                    and stream
+                    and self._error_mentions(exc, "stream")
+                ):
+                    stream = False
+                    payload["stream"] = False
+                    payload.pop("stream_options", None)
+                    degraded.append("streaming")
+                    continue
+                param = (
+                    self._unsupported_parameter(exc, payload)
+                    if exc.status_code == 400
+                    else ""
+                )
                 if not param:
                     raise
                 payload.pop(param, None)
@@ -275,7 +400,8 @@ class OpenAICompatibleProvider(AIProvider):
         if tools and self.capabilities.supports_tools:
             payload["tools"] = [
                 {"type": "function", **item.get("function", {})}
-                for item in tools if item.get("type") == "function"
+                for item in tools
+                if item.get("type") == "function"
             ]
         if self.config.temperature is not None:
             payload["temperature"] = self.config.temperature
@@ -290,51 +416,67 @@ class OpenAICompatibleProvider(AIProvider):
                 response = self._request("POST", "responses", json=payload)
                 break
             except ProviderError as exc:
-                parameter = self._unsupported_parameter(exc, payload) if exc.status_code == 400 else ""
+                parameter = (
+                    self._unsupported_parameter(exc, payload)
+                    if exc.status_code == 400
+                    else ""
+                )
                 if not parameter:
                     raise
                 payload.pop(parameter, None)
                 degraded.append(parameter)
 
-        body = response.json()
+        body = self._response_json(response)
         text_parts = []
         calls = []
         for item in body.get("output") or []:
             if item.get("type") == "function_call":
-                calls.append(ToolCall(
-                    str(item.get("call_id") or item.get("id") or ""),
-                    str(item.get("name") or ""),
-                    str(item.get("arguments") or "{}"),
-                ))
+                calls.append(
+                    ToolCall(
+                        str(item.get("call_id") or item.get("id") or ""),
+                        str(item.get("name") or ""),
+                        str(item.get("arguments") or "{}"),
+                    )
+                )
             if item.get("type") == "message":
                 for part in item.get("content") or []:
                     if part.get("type") in {"output_text", "text"}:
                         text_parts.append(str(part.get("text") or ""))
         return ProviderResponse(
-            content="".join(text_parts), tool_calls=calls,
+            content="".join(text_parts),
+            tool_calls=calls,
             finish_reason=str(body.get("status") or ""),
             endpoint=endpoint_url(self.config.base_url, "responses"),
-            status_code=response.status_code, usage=body.get("usage") or {},
+            status_code=response.status_code,
+            usage=body.get("usage") or {},
             degraded_parameters=degraded,
         )
 
     def _generate_json(self, payload: dict) -> ProviderResponse:
         response = self._request("POST", "chat/completions", json=payload)
-        body = response.json()
+        body = self._response_json(response)
         choice = (body.get("choices") or [{}])[0]
         message = choice.get("message") or {}
         calls = [
-            ToolCall(str(item.get("id") or ""), str((item.get("function") or {}).get("name") or ""), str((item.get("function") or {}).get("arguments") or "{}"))
+            ToolCall(
+                str(item.get("id") or ""),
+                str((item.get("function") or {}).get("name") or ""),
+                str((item.get("function") or {}).get("arguments") or "{}"),
+            )
             for item in (message.get("tool_calls") or [])
         ]
         return ProviderResponse(
-            content=str(message.get("content") or ""), tool_calls=calls,
+            content=str(message.get("content") or ""),
+            tool_calls=calls,
             finish_reason=str(choice.get("finish_reason") or ""),
             endpoint=endpoint_url(self.config.base_url, "chat/completions"),
-            status_code=response.status_code, usage=body.get("usage") or {},
+            status_code=response.status_code,
+            usage=body.get("usage") or {},
         )
 
-    def _generate_stream(self, payload: dict, on_text_delta: Optional[Callable[[str], None]]) -> ProviderResponse:
+    def _generate_stream(
+        self, payload: dict, on_text_delta: Optional[Callable[[str], None]]
+    ) -> ProviderResponse:
         url = endpoint_url(self.config.base_url, "chat/completions")
         try:
             with self._client.stream("POST", url, json=payload) as response:
@@ -342,10 +484,16 @@ class OpenAICompatibleProvider(AIProvider):
                     response.read()
                     detail = response.text[:400]
                     try:
-                        data = response.json(); detail = (data.get("error") or {}).get("message", detail)
-                    except Exception:
-                        pass
-                    raise user_error(response.status_code, detail)
+                        data = response.json()
+                        detail = (data.get("error") or {}).get("message", detail)
+                    except ValueError:
+                        # Non-JSON provider errors are valid; keep the bounded
+                        # response text captured above instead of hiding it.
+                        data = None
+                    raise user_error(
+                        response.status_code,
+                        self._redact_secrets(detail),
+                    )
                 content, finish, usage = [], "", {}
                 calls: dict[int, dict] = {}
                 for line in response.iter_lines():
@@ -370,18 +518,27 @@ class OpenAICompatibleProvider(AIProvider):
                                 on_text_delta(text)
                         for item in delta.get("tool_calls") or []:
                             idx = int(item.get("index", 0))
-                            slot = calls.setdefault(idx, {"id": "", "name": "", "arguments": ""})
+                            slot = calls.setdefault(
+                                idx, {"id": "", "name": "", "arguments": ""}
+                            )
                             slot["id"] += str(item.get("id") or "")
                             fn = item.get("function") or {}
                             slot["name"] += str(fn.get("name") or "")
                             slot["arguments"] += str(fn.get("arguments") or "")
                 return ProviderResponse(
                     content="".join(content),
-                    tool_calls=[ToolCall(v["id"], v["name"], v["arguments"]) for _, v in sorted(calls.items())],
-                    finish_reason=str(finish), endpoint=url,
-                    status_code=response.status_code, usage=usage,
+                    tool_calls=[
+                        ToolCall(v["id"], v["name"], v["arguments"])
+                        for _, v in sorted(calls.items())
+                    ],
+                    finish_reason=str(finish),
+                    endpoint=url,
+                    status_code=response.status_code,
+                    usage=usage,
                 )
         except httpx.TimeoutException as exc:
             raise ProviderError("Connection timed out", category="timeout") from exc
         except httpx.HTTPError as exc:
-            raise ProviderError(f"Connection failed: {type(exc).__name__}", category="connection") from exc
+            raise ProviderError(
+                f"Connection failed: {type(exc).__name__}", category="connection"
+            ) from exc

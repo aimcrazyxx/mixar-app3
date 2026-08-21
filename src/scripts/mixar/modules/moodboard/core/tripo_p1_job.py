@@ -33,9 +33,11 @@ class TripoP1MultiViewJob(Job):
 
         def _main(callback, value):
             import bpy
+
             def _run():
                 callback(value)
                 return None
+
             bpy.app.timers.register(_run, first_interval=0.0)
 
         def _worker():
@@ -43,19 +45,24 @@ class TripoP1MultiViewJob(Job):
             try:
                 client = TripoP1Client(key_snapshot)
                 tokens = {
-                    view: client.upload_image(data, f"{view}.png")
+                    view: client.upload_image(data, f"{view}.jpg")
                     for view, data in image_snapshot.items()
                     if data
                 }
                 task_id = client.create_multiview_task(
-                    tokens, texture=self.texture, pbr=self.pbr,
-                    face_limit=self.face_limit, model_seed=self.model_seed,
+                    tokens,
+                    texture=self.texture,
+                    pbr=self.pbr,
+                    face_limit=self.face_limit,
+                    model_seed=self.model_seed,
                 )
                 self._model_url = client.wait_for_model(
-                    task_id, should_cancel=lambda: self.state == JobState.CANCELLED,
+                    task_id,
+                    should_cancel=lambda: self.state == JobState.CANCELLED,
                 )
                 response = APIResponse(
-                    success=True, status_code=200,
+                    success=True,
+                    status_code=200,
                     data={"data": {"status": "DONE", "task_id": task_id}},
                 )
                 _main(on_success, response)
