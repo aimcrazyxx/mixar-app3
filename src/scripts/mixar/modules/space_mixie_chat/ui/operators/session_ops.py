@@ -324,8 +324,15 @@ class MIXIE_CHAT_OT_abort_session(Operator):
         except Exception as e:
             logger.debug(f"finalize_turn on abort skipped: {e}")
 
-        # 5. Send abort to backend
-        self._send_abort_request_async(session.get_session_id(scene))
+        # 5. Cancel the active execution lane. Direct custom providers run
+        # locally; catalog providers keep the existing backend cancellation.
+        try:
+            from mixar.modules.byok.core.custom_agent_runtime import cancel as cancel_custom
+            custom_cancelled = cancel_custom(scene_name)
+        except Exception:
+            custom_cancelled = False
+        if not custom_cancelled:
+            self._send_abort_request_async(session.get_session_id(scene))
 
         # 6. Reset state
         session.clear_streaming()

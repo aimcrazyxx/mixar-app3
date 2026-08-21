@@ -16,15 +16,20 @@ callbacks — see core/model_suggestions.py for the cache and fetch wiring.
 Users see friendly labels; the IDs are what get sent to the server.
 """
 
+import json
+
 import bpy
-from bpy.props import BoolProperty, EnumProperty, StringProperty
+from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, StringProperty
 
 from ...constants import (
     BYOK_API_KEY_MAX_LENGTH,
     CODEX_DEFAULT_MODEL,
     DIALOG_STATE_ITEMS,
     OPENROUTER_DEFAULT_MODEL,
+    OPENAI_COMPATIBLE_DEFAULT_BASE_URL,
+    OPENAI_COMPATIBLE_DEFAULT_MODEL,
 )
+from ...core import custom_model_cache
 from ...core.model_suggestions import get_model_items, get_provider_items
 
 
@@ -64,11 +69,23 @@ def _provider_changed(self, context):
         pass
 
 
+def _custom_model_items(self, context):
+    return custom_model_cache.get_items()
+
+
+def _custom_discovered_changed(self, context):
+    if self.byok_custom_discovered_model != '__manual__':
+        self.byok_custom_model = self.byok_custom_discovered_model
+
+
 def wipe_transient_secrets(wm) -> None:
     """Best-effort wipe of credential form fields on a WindowManager."""
     if wm is None:
         return
-    for attr in ('byok_form_api_key', 'byok_form_codex_bundle'):
+    for attr in (
+        'byok_form_api_key', 'byok_form_codex_bundle',
+        'byok_custom_api_key', 'byok_custom_api_key_visible',
+    ):
         try:
             setattr(wm, attr, '')
         except Exception:
@@ -89,6 +106,31 @@ _WM_ATTRS = (
     'byok_key_preview',
     'byok_dialog_state',
     'byok_last_error',
+    'byok_custom_enabled',
+    'byok_custom_base_url',
+    'byok_custom_api_key',
+    'byok_custom_api_key_visible',
+    'byok_custom_show_key',
+    'byok_custom_model',
+    'byok_custom_discovered_model',
+    'byok_custom_timeout',
+    'byok_custom_max_output_tokens',
+    'byok_custom_use_temperature',
+    'byok_custom_temperature',
+    'byok_custom_use_top_p',
+    'byok_custom_top_p',
+    'byok_custom_reasoning_effort',
+    'byok_custom_headers',
+    'byok_custom_context_limit',
+    'byok_custom_tool_calling',
+    'byok_custom_vision',
+    'byok_custom_streaming',
+    'byok_custom_endpoint_mode',
+    'byok_custom_max_iterations',
+    'byok_custom_advanced_expanded',
+    'byok_custom_debug_enabled',
+    'byok_custom_debug_expanded',
+    'byok_custom_debug_report',
 )
 
 
@@ -171,6 +213,115 @@ def register():
         default='IDLE',
     )
     WM.byok_last_error = StringProperty(default='')
+
+    # --- Direct OpenAI-compatible provider (non-secret config) ---
+    WM.byok_custom_enabled = BoolProperty(default=False, options={'SKIP_SAVE'})
+    WM.byok_custom_base_url = StringProperty(
+        name="Base URL", default=OPENAI_COMPATIBLE_DEFAULT_BASE_URL,
+        description="API root; Mixar normalizes this to exactly one /v1",
+    )
+    WM.byok_custom_api_key = StringProperty(
+        name="API Key", default='', maxlen=BYOK_API_KEY_MAX_LENGTH,
+        subtype='PASSWORD', options={'SKIP_SAVE'},
+    )
+    WM.byok_custom_api_key_visible = StringProperty(
+        name="API Key", default='', maxlen=BYOK_API_KEY_MAX_LENGTH,
+        options={'SKIP_SAVE'},
+    )
+    WM.byok_custom_show_key = BoolProperty(default=False, options={'SKIP_SAVE'})
+    WM.byok_custom_model = StringProperty(
+        name="Model", default=OPENAI_COMPATIBLE_DEFAULT_MODEL,
+    )
+    WM.byok_custom_discovered_model = EnumProperty(
+        name="Available models", items=_custom_model_items,
+        update=_custom_discovered_changed,
+    )
+    WM.byok_custom_timeout = FloatProperty(
+        name="Timeout", default=120.0, min=5.0, max=1800.0, subtype='TIME',
+    )
+    WM.byok_custom_max_output_tokens = IntProperty(
+        name="Max output tokens", default=8192, min=1, max=1048576,
+    )
+    WM.byok_custom_use_temperature = BoolProperty(name="Temperature", default=False)
+    WM.byok_custom_temperature = FloatProperty(default=0.7, min=0.0, max=2.0)
+    WM.byok_custom_use_top_p = BoolProperty(name="Top P", default=False)
+    WM.byok_custom_top_p = FloatProperty(default=1.0, min=0.0, max=1.0)
+    WM.byok_custom_reasoning_effort = EnumProperty(
+        name="Reasoning effort",
+        items=(
+            ('NONE', "Provider default", "Do not send reasoning_effort"),
+            ('low', "Low", "Low reasoning effort"),
+            ('medium', "Medium", "Medium reasoning effort"),
+            ('high', "High", "High reasoning effort"),
+            ('xhigh', "Extra high", "Extra-high reasoning effort"),
+        ), default='NONE',
+    )
+    WM.byok_custom_headers = StringProperty(
+        name="Custom headers (JSON)", default='', options={'SKIP_SAVE'},
+        description='Optional JSON object, e.g. {"X-Organization":"team"}',
+    )
+    WM.byok_custom_context_limit = IntProperty(
+        name="Context token limit", default=0, min=0, max=2097152,
+        description="Approximate local trimming limit; 0 keeps all history",
+    )
+    WM.byok_custom_tool_calling = BoolProperty(name="Tool calling", default=True)
+    WM.byok_custom_vision = BoolProperty(name="Vision", default=True)
+    WM.byok_custom_streaming = BoolProperty(name="Streaming", default=True)
+    WM.byok_custom_endpoint_mode = EnumProperty(
+        name="API endpoint",
+        items=(
+            ('auto', "Auto", "Try Chat Completions, then Responses on 404/405"),
+            ('chat_completions', "Chat Completions", "Use /chat/completions only"),
+            ('responses', "Responses", "Use /responses only"),
+        ), default='auto',
+    )
+    WM.byok_custom_max_iterations = IntProperty(
+        name="Maximum agent iterations", default=20, min=1, max=100,
+    )
+    WM.byok_custom_advanced_expanded = BoolProperty(default=False)
+    WM.byok_custom_debug_enabled = BoolProperty(name="Debug report", default=False)
+    WM.byok_custom_debug_expanded = BoolProperty(default=False)
+    WM.byok_custom_debug_report = StringProperty(
+        default='', options={'SKIP_SAVE'}, maxlen=65535,
+    )
+
+    def _restore_custom_provider():
+        try:
+            from mixar.modules.common.secure_storage import get_secret, masked_preview
+            wm = bpy.context.window_manager
+            raw = get_secret('openai_compatible_config')
+            if not raw:
+                return None
+            data = json.loads(raw)
+            wm.byok_custom_base_url = data.get('base_url', wm.byok_custom_base_url)
+            wm.byok_custom_model = data.get('model', wm.byok_custom_model)
+            wm.byok_custom_timeout = data.get('timeout', wm.byok_custom_timeout)
+            wm.byok_custom_max_output_tokens = data.get(
+                'max_output_tokens', wm.byok_custom_max_output_tokens)
+            wm.byok_custom_use_temperature = data.get('temperature') is not None
+            if data.get('temperature') is not None:
+                wm.byok_custom_temperature = data['temperature']
+            wm.byok_custom_use_top_p = data.get('top_p') is not None
+            if data.get('top_p') is not None:
+                wm.byok_custom_top_p = data['top_p']
+            wm.byok_custom_reasoning_effort = data.get('reasoning_effort') or 'NONE'
+            wm.byok_custom_headers = json.dumps(data.get('custom_headers') or {})
+            wm.byok_custom_context_limit = data.get('context_limit', 0)
+            wm.byok_custom_tool_calling = data.get('tool_calling', True)
+            wm.byok_custom_vision = data.get('vision', True)
+            wm.byok_custom_streaming = data.get('streaming', True)
+            wm.byok_custom_endpoint_mode = data.get('endpoint_mode', 'auto')
+            wm.byok_custom_enabled = True
+            wm.byok_is_active = True
+            wm.byok_current_provider = 'openai-compatible'
+            wm.byok_current_model = wm.byok_custom_model
+            wm.byok_key_preview = masked_preview(
+                get_secret('openai_compatible_api_key'))
+        except Exception:
+            pass
+        return None
+
+    bpy.app.timers.register(_restore_custom_provider, first_interval=0.0)
 
 
 def unregister():

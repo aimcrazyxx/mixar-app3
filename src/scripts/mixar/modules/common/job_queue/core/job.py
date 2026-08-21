@@ -208,6 +208,10 @@ class Job:
         """
         return False
 
+    def inline_result_files(self) -> list:
+        """Files already produced during ``submit`` for synchronous jobs."""
+        return []
+
     def handle_result(self, result_files, on_done, on_error):
         """Override for non-standard results (images, textures, inline data).
 

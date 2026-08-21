@@ -433,6 +433,33 @@ class MixieMoodboardTabImageTo3DProps(PropertyGroup):
         update=_on_model_changed,
     )
 
+    # Tripo P1 is exposed under the existing catalog model ``tripo-low``.
+    # Single keeps the legacy backend path; Multi View uses Tripo's public v3
+    # endpoint directly because older Mixar backends do not expose it.
+    tripo_input_mode: EnumProperty(
+        name="Input",
+        items=(
+            ('SINGLE', "Single", "Use the existing single-image flow"),
+            ('MULTI', "Multi View", "Use Tripo P1 with labeled views"),
+        ), default='SINGLE',
+    )
+    tripo_front_image: PointerProperty(type=bpy.types.Image, name="Front")
+    tripo_left_image: PointerProperty(type=bpy.types.Image, name="Left")
+    tripo_back_image: PointerProperty(type=bpy.types.Image, name="Back")
+    tripo_right_image: PointerProperty(type=bpy.types.Image, name="Right")
+    tripo_texture: BoolProperty(name="Texture", default=True)
+    tripo_pbr: BoolProperty(name="PBR", default=True)
+    tripo_face_limit: IntProperty(
+        name="Face Limit", default=0, min=0, max=20000,
+        description="0 lets Tripo choose; otherwise 50–20,000",
+    )
+    tripo_model_seed: IntProperty(name="Model Seed", default=0, min=0)
+    tripo_api_key: StringProperty(
+        name="Tripo API Key", default='', subtype='PASSWORD',
+        maxlen=256, options={'SKIP_SAVE'},
+    )
+    tripo_key_preview: StringProperty(default='', options={'SKIP_SAVE'})
+
     # Which multi-view (turnaround) set the Multiple Views panel is showing
     # and growing. UI STATE ONLY — it does not decide what a generation
     # submits. A set is bound to exactly one image, the moodboard item

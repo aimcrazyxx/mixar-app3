@@ -181,6 +181,12 @@ class MIXIE_OT_model_gen_generate(Operator):
             self.report({"WARNING"}, "Please wait for models to load")
             return {"CANCELLED"}
 
+        if (
+            model.lower() == "tripo-low"
+            and getattr(tab, 'tripo_input_mode', 'SINGLE') == 'MULTI'
+        ):
+            return self._execute_tripo_p1(context, tab, model)
+
         # --- Inputs (image shared by all modes; multi-view for models that
         # advertise supports_multi_view, keyed per-model not per-service) ---
         image = self._get_input_image(context, tab)
@@ -282,9 +288,93 @@ class MIXIE_OT_model_gen_generate(Operator):
         self.report({"INFO"}, "Added to queue")
         return {"FINISHED"}
 
+    def _execute_tripo_p1(self, context, tab, model):
+        from mixar.modules.common.job_queue import (
+            create_scene_flag_listener, get_queue_with_listener,
+        )
+        from mixar.modules.common.job_queue.constants import FEATURE_MODEL_3D
+        from mixar.modules.common.utils.image_utils import compress_image_for_upload
+        from mixar.modules.common.secure_storage import get_secret
+        from mixar.modules.moodboard.core.tripo_p1_job import TripoP1MultiViewJob
+
+        key = get_secret('tripo_api_key')
+        if not key:
+            self.report({"ERROR"}, "Save your Tripo API key before using P1 Multi-View")
+            return {"CANCELLED"}
+        images = {
+            'front': getattr(tab, 'tripo_front_image', None),
+            'left': getattr(tab, 'tripo_left_image', None),
+            'back': getattr(tab, 'tripo_back_image', None),
+            'right': getattr(tab, 'tripo_right_image', None),
+        }
+        if images['front'] is None or sum(value is not None for value in images.values()) < 2:
+            self.report({"ERROR"}, "Tripo P1 requires Front plus at least one other view")
+            return {"CANCELLED"}
+        face_limit = int(getattr(tab, 'tripo_face_limit', 0))
+        if face_limit and face_limit < 50:
+            self.report({"ERROR"}, "Face Limit must be 0 or between 50 and 20,000")
+            return {"CANCELLED"}
+        try:
+            image_bytes = {
+                view: compress_image_for_upload(image)
+                for view, image in images.items() if image is not None
+            }
+        except Exception as exc:
+            self.report({"ERROR"}, f"Failed to process Tripo view: {exc}")
+            return {"CANCELLED"}
+
+        job = TripoP1MultiViewJob(
+            feature_key=FEATURE_MODEL_3D,
+            label=f"{images['front'].name} (P1 Multi-View)",
+            model=model,
+            images=image_bytes,
+            api_key=key,
+            texture=bool(tab.tripo_texture),
+            pbr=bool(tab.tripo_pbr and tab.tripo_texture),
+            face_limit=face_limit,
+            model_seed=int(tab.tripo_model_seed),
+        )
+        listener = create_scene_flag_listener(
+            "mixie_image_to_3d_is_generating",
+            batch_popup_title="Image to 3D batch complete",
+        )
+        queue = get_queue_with_listener(FEATURE_MODEL_3D, listener)
+        if not queue.submit(job):
+            self.report({"WARNING"}, "A duplicate generation is already queued")
+            return {"CANCELLED"}
+        from mixar.modules.common.job_queue.ui.lists.queue_uilist import mark_enqueued
+        mark_enqueued(FEATURE_MODEL_3D)
+        self.report({"INFO"}, "Tripo P1 Multi-View added to queue")
+        return {"FINISHED"}
+
+
+class MIXIE_OT_tripo_p1_save_key(Operator):
+    """Store the Tripo key outside the .blend file."""
+
+    bl_idname = "mixie.tripo_p1_save_key"
+    bl_label = "Save Tripo API Key"
+    bl_options = {'INTERNAL'}
+
+    def execute(self, context):
+        from mixar.modules.common.secure_storage import masked_preview, set_secret
+
+        tab = context.scene.mixie_moodboard_sidebar.tab_image_to_3d
+        key = tab.tripo_api_key.strip()
+        if not key:
+            self.report({'ERROR'}, "Enter a Tripo API key")
+            return {'CANCELLED'}
+        if not set_secret('tripo_api_key', key):
+            self.report({'ERROR'}, "Could not store the key in the operating-system credential vault")
+            return {'CANCELLED'}
+        tab.tripo_key_preview = masked_preview(key)
+        tab.tripo_api_key = ''
+        self.report({'INFO'}, "Tripo API key stored securely")
+        return {'FINISHED'}
+
 
 classes = (
     MIXIE_OT_model_gen_generate,
+    MIXIE_OT_tripo_p1_save_key,
 )
 
 

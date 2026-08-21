@@ -83,7 +83,14 @@ class MIXIE_CHAT_OT_send_message(Operator):
         """Allow sending when idle, modifying, or awaiting input."""
         session = get_session_manager()
         scene = context.scene
-        return session.get_state(scene) in (SessionState.IDLE, SessionState.MODIFYING, SessionState.AWAITING_INPUT)
+        state = session.get_state(scene)
+        if state in (SessionState.IDLE, SessionState.MODIFYING, SessionState.AWAITING_INPUT):
+            return True
+        try:
+            from mixar.modules.byok.core.custom_agent_runtime import is_active
+            return state == SessionState.OFFLINE and is_active(context.window_manager)
+        except Exception:
+            return False
 
     def execute(self, context):
         metrics = get_metrics()
@@ -138,14 +145,16 @@ class MIXIE_CHAT_OT_send_message(Operator):
         if DEV_MODE:
             return self._execute_dev_mode(context, message_text)
 
-        connection_manager = get_connection_manager()
-        ws_client = get_jsonrpc_client()
+        from mixar.modules.byok.core import custom_agent_runtime
+        custom_active = custom_agent_runtime.is_active(context.window_manager)
+        connection_manager = get_connection_manager() if not custom_active else None
+        ws_client = get_jsonrpc_client() if not custom_active else None
 
-        if not connection_manager.is_connected or not ws_client:
+        if not custom_active and (not connection_manager.is_connected or not ws_client):
             self.report({'ERROR'}, "Not connected to server")
             return {'CANCELLED'}
 
-        if not ws_client.connection_id:
+        if not custom_active and not ws_client.connection_id:
             self.report({'ERROR'}, "WebSocket not ready — no connection ID")
             return {'CANCELLED'}
 
@@ -196,17 +205,19 @@ class MIXIE_CHAT_OT_send_message(Operator):
         redraw_chat_areas()
         metrics.stop_timer('optimistic_ui_redraw')
 
-        # Create SSE handler with queue callbacks
-        base_url = get_server_url()
         target_scene_name = scene.name
-        sse_handler = create_sse_handler(
-            scene_name=target_scene_name,
-            host=base_url,
-            on_event=lambda event: queue_sse_event(event, target_scene_name),
-            on_error=lambda error: queue_sse_error(error, target_scene_name),
-            on_complete=lambda: queue_sse_complete(target_scene_name),
-        )
-        auth_token = get_auth_token()
+        sse_handler = None
+        auth_token = None
+        if not custom_active:
+            base_url = get_server_url()
+            sse_handler = create_sse_handler(
+                scene_name=target_scene_name,
+                host=base_url,
+                on_event=lambda event: queue_sse_event(event, target_scene_name),
+                on_error=lambda error: queue_sse_error(error, target_scene_name),
+                on_complete=lambda: queue_sse_complete(target_scene_name),
+            )
+            auth_token = get_auth_token()
 
         # Encode pending attachments to base64 asynchronously
         encoded_attachments = []
@@ -314,6 +325,24 @@ class MIXIE_CHAT_OT_send_message(Operator):
                 attachment_names.append(resolved_name)
 
         metrics.start_timer('sse_start')
+
+        if custom_active:
+            wire_message = compose_wire_message(scene, message_text)
+            success, error = custom_agent_runtime.start(
+                scene, encoded_attachments, wire_message=wire_message,
+            )
+            if not success:
+                self.report({'ERROR'}, error or "Failed to start custom provider")
+                session.set_error(scene)
+                metrics.stop_timer('send_message_total')
+                return {'CANCELLED'}
+            mark_rules_sent(scene)
+            pending_attachments.clear()
+            redraw_chat_areas()
+            metrics.stop_timer('sse_start')
+            metrics.stop_timer('send_message_total')
+            self.report({'INFO'}, "Message sent")
+            return {'FINISHED'}
 
         if is_modify or is_awaiting_input:
             # Send via input stream (modify feedback or user input response)

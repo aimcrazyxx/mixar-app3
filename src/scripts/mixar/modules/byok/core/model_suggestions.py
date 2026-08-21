@@ -39,6 +39,8 @@ from ..constants import (
     MODEL_EMPTY_SENTINEL,
     OPENROUTER_PROVIDER_ID,
     OPENROUTER_PROVIDER_ITEM,
+    OPENAI_COMPATIBLE_PROVIDER_ID,
+    OPENAI_COMPATIBLE_PROVIDER_ITEM,
     PROVIDER_EMPTY_SENTINEL,
     PROVIDER_LOADING_SENTINEL,
 )
@@ -64,6 +66,11 @@ def is_codex(provider: str) -> bool:
     return provider == CODEX_PROVIDER_ID
 
 
+def is_openai_compatible(provider: str) -> bool:
+    """True for the direct custom OpenAI-compatible provider."""
+    return provider == OPENAI_COMPATIBLE_PROVIDER_ID
+
+
 def get_provider_items() -> list[tuple[str, str, str]]:
     """EnumProperty items for the provider dropdown.
 
@@ -80,7 +87,11 @@ def get_provider_items() -> list[tuple[str, str, str]]:
         cloud = [PROVIDER_LOADING_SENTINEL]
     items = list(cloud)
     identifiers = {item[0] for item in items}
-    for client_item in (OPENROUTER_PROVIDER_ITEM, CODEX_PROVIDER_ITEM):
+    for client_item in (
+        OPENROUTER_PROVIDER_ITEM,
+        CODEX_PROVIDER_ITEM,
+        OPENAI_COMPATIBLE_PROVIDER_ITEM,
+    ):
         if client_item[0] not in identifiers:
             items.append(client_item)
     return items

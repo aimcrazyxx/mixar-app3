@@ -684,7 +684,7 @@ class FeatureQueue(DownloadMixin):
         if job.should_skip_poll():
             job.state = JobState.RUNNING_DOWNLOAD
             self._notify()
-            self._begin_download(job, [])
+            self._begin_download(job, job.inline_result_files())
             return
 
         job.state = JobState.RUNNING_POLL
