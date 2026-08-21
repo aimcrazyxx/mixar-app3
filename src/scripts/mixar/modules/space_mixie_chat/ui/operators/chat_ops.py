@@ -13,33 +13,39 @@ Generate mode is delegated to generate_ops.py.
 import json
 import os
 import uuid
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
+from contextlib import suppress
 
 import bpy
 from bpy.types import Operator
-
 from mixar.config.config import get_server_url
 from mixar.config.logging_config import get_logger
 from mixar.modules.common.analytics.capture import capture
 from mixar.modules.common.analytics.constants import EVENT_MESSAGE_SENT
 
-from ...constants import DEV_MODE, MAX_MESSAGE_LENGTH, SessionState, TEMP_PLACEHOLDER_PREFIX
-from ...core.performance_metrics import get_metrics
+from ...constants import (
+    DEV_MODE,
+    MAX_MESSAGE_LENGTH,
+    TEMP_PLACEHOLDER_PREFIX,
+    SessionState,
+)
 from ...core import (
     get_session_manager,
     image_to_base64,
 )
+from ...core.animation_manager import start_loader_animation
 from ...core.connection_manager import get_connection_manager
 from ...core.jsonrpc_client import get_jsonrpc_client
-from ...core.queue_processor import (
-    queue_sse_event,
-    queue_sse_error,
-    queue_sse_complete,
-)
-from ...core.sse_handler import create_sse_handler
-from ...core.animation_manager import start_loader_animation
 from ...core.message_helpers import get_auth_token
+from ...core.performance_metrics import get_metrics
+from ...core.queue_processor import (
+    queue_sse_complete,
+    queue_sse_error,
+    queue_sse_event,
+)
 from ...core.rules import compose_wire_message, mark_rules_sent
+from ...core.sse_handler import create_sse_handler
 from ...core.ui_utils import redraw_chat_areas
 from . import generate_ops
 
@@ -88,7 +94,11 @@ class MIXIE_CHAT_OT_send_message(Operator):
             return True
         try:
             from mixar.modules.byok.core.custom_agent_runtime import is_active
-            return state == SessionState.OFFLINE and is_active(context.window_manager)
+            return (
+                state == SessionState.OFFLINE
+                and scene.mixie_chat_mode != 'GENERATE'
+                and is_active(context.window_manager)
+            )
         except Exception:
             return False
 
@@ -110,8 +120,16 @@ class MIXIE_CHAT_OT_send_message(Operator):
 
         message_text = scene.mixie_chat_input.strip()
         session = get_session_manager()
-        is_modify = (session.get_state(scene) == SessionState.MODIFYING)
-        is_awaiting_input = (session.get_state(scene) == SessionState.AWAITING_INPUT)
+        from mixar.modules.byok.core import custom_agent_runtime
+        custom_active = custom_agent_runtime.is_active(context.window_manager)
+        state = session.get_state(scene)
+        # MODIFYING/AWAITING_INPUT are backend interrupt states.  The direct
+        # provider has no /agent/input protocol, so selecting it always opens a
+        # normal direct turn instead of accidentally answering a backend run.
+        is_modify = state == SessionState.MODIFYING and not custom_active
+        is_awaiting_input = (
+            state == SessionState.AWAITING_INPUT and not custom_active
+        )
         pending_attachments = scene.mixie_chat_pending_attachments
 
         if not message_text and (is_modify or is_awaiting_input or len(pending_attachments) == 0):
@@ -139,14 +157,21 @@ class MIXIE_CHAT_OT_send_message(Operator):
             "is_awaiting_input": is_awaiting_input,
             "plan_enabled": bool(getattr(scene, "mixie_chat_plan_enabled", False)),
             "model": getattr(scene, "mixie_chat_model", "") or None,
+            "agent_route": "direct_custom" if custom_active else "backend",
         }, context=context)
 
         # Dev mode: simulate response without backend
         if DEV_MODE:
             return self._execute_dev_mode(context, message_text)
 
-        from mixar.modules.byok.core import custom_agent_runtime
-        custom_active = custom_agent_runtime.is_active(context.window_manager)
+        # A conversation id must never cross the backend/direct boundary.  Do
+        # this before compose_wire_message so the first turn on the new route
+        # carries the complete project-rules block, exactly like a new backend
+        # session.  Validation above stays side-effect free for rejected sends.
+        if custom_agent_runtime.prepare_session_route(scene, custom_active):
+            is_modify = False
+            is_awaiting_input = False
+
         connection_manager = get_connection_manager() if not custom_active else None
         ws_client = get_jsonrpc_client() if not custom_active else None
 
@@ -260,8 +285,10 @@ class MIXIE_CHAT_OT_send_message(Operator):
                             '.jpg': 'image/jpeg',
                             '.jpeg': 'image/jpeg',
                             '.bmp': 'image/bmp',
+                            '.gif': 'image/gif',
                             '.tiff': 'image/tiff',
-                            '.tif': 'image/tiff'
+                            '.tif': 'image/tiff',
+                            '.webp': 'image/webp',
                         }
                         mime_type = mime_map.get(ext, 'image/png')
                         encoded_attachments.append({"base64": b64, "mime_type": mime_type})
@@ -275,7 +302,7 @@ class MIXIE_CHAT_OT_send_message(Operator):
                 encoded_attachments = []
             except Exception as e:
                 logger.error(f"Image encoding error: {e}")
-                self.report({'WARNING'}, f"Image encoding failed: {str(e)}")
+                self.report({'WARNING'}, f"Image encoding failed: {e!s}")
                 encoded_attachments = []
 
             total_encode_time = metrics.stop_timer('image_encoding_total')
@@ -313,10 +340,8 @@ class MIXIE_CHAT_OT_send_message(Operator):
                                 img.colorspace_settings.name = 'sRGB'
                                 # Pack so a later move/delete of the source file
                                 # doesn't break the agent's reference.
-                                try:
+                                with suppress(RuntimeError):
                                     img.pack()
-                                except RuntimeError:
-                                    pass
                                 resolved_name = img.name
                             except RuntimeError as e:
                                 logger.warning(f"Could not load attachment {att.image_path}: {e}")
@@ -415,7 +440,7 @@ class MIXIE_CHAT_OT_send_message(Operator):
                 deselect_all_moodboard_origin_attachments,
             )
             deselect_all_moodboard_origin_attachments(scene)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             # Moodboard module may not be loaded — never block the send.
             logger.debug(
                 "moodboard deselect on send skipped: %s", e, exc_info=True

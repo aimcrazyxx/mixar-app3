@@ -967,6 +967,90 @@ def test_debug_report_keeps_non_secret_token_counts():
     assert '"access_token": "[REDACTED]"' in report
 
 
+@pytest.mark.parametrize(
+    "enabled, provider, expected",
+    [
+        (True, "openai-compatible", True),
+        (True, "openai", False),
+        (True, "openrouter", False),
+        (False, "openai-compatible", False),
+        (True, "", False),
+    ],
+)
+def test_direct_route_requires_explicit_custom_provider_selection(
+    enabled, provider, expected
+):
+    wm = SimpleNamespace(
+        byok_custom_enabled=enabled,
+        byok_current_provider=provider,
+    )
+
+    assert custom_agent_runtime.is_active(wm) is expected
+
+
+def test_switching_from_backend_to_direct_starts_a_fresh_wire_session():
+    scene = SimpleNamespace(name="Route-Test", mixie_session_id="backend-session")
+
+    changed = custom_agent_runtime.prepare_session_route(scene, True)
+
+    assert changed is True
+    assert scene.mixie_session_id == ""
+
+
+def test_switching_from_direct_to_backend_never_reuses_local_session_id():
+    session_id = "direct-session"
+    scene = SimpleNamespace(name="Route-Test", mixie_session_id=session_id)
+    custom_agent_runtime._remember_custom_session(session_id)
+    custom_agent_runtime._session_histories[session_id] = [
+        {"role": "user", "content": "local only"}
+    ]
+
+    try:
+        assert custom_agent_runtime.prepare_session_route(scene, True) is False
+        assert scene.mixie_session_id == session_id
+
+        assert custom_agent_runtime.prepare_session_route(scene, False) is True
+        assert scene.mixie_session_id == ""
+        assert custom_agent_runtime.is_custom_session(session_id) is False
+        assert session_id not in custom_agent_runtime._session_histories
+    finally:
+        custom_agent_runtime.forget_session(session_id)
+
+
+def test_backend_route_preserves_unknown_backend_owned_session_id():
+    scene = SimpleNamespace(name="Route-Test", mixie_session_id="backend-session")
+
+    assert custom_agent_runtime.prepare_session_route(scene, False) is False
+    assert scene.mixie_session_id == "backend-session"
+
+
+def test_prefixed_direct_session_remains_identifiable_after_runtime_reload():
+    session_id = custom_agent_runtime.CUSTOM_SESSION_PREFIX + "saved-session"
+    scene = SimpleNamespace(name="Route-Test", mixie_session_id=session_id)
+
+    assert custom_agent_runtime.is_custom_session(session_id) is True
+    assert custom_agent_runtime.prepare_session_route(scene, False) is True
+    assert scene.mixie_session_id == ""
+
+
+def test_direct_multimodal_message_keeps_backend_image_content_shape():
+    message = custom_agent_runtime._with_images(
+        {"role": "user", "content": "project rules\n\nbuild this"},
+        [{"mime_type": "image/webp", "base64": "d2VicA=="}],
+    )
+
+    assert message == {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "project rules\n\nbuild this"},
+            {
+                "type": "image_url",
+                "image_url": {"url": "data:image/webp;base64,d2VicA=="},
+            },
+        ],
+    }
+
+
 def test_compatible_provider_modules_respect_project_line_limit():
     core = Path(__file__).parents[1] / "src/scripts/mixar/modules/byok/core"
 
@@ -975,6 +1059,8 @@ def test_compatible_provider_modules_respect_project_line_limit():
         "openai_compatible_http.py",
         "openai_compatible_parse.py",
         "openai_compatible_wire.py",
+        "agent_loop.py",
+        "custom_agent_runtime.py",
     ):
         assert len((core / filename).read_text(encoding="utf-8").splitlines()) <= 500
 
@@ -999,6 +1085,19 @@ def test_stale_agent_finalizer_cannot_clear_newer_run_state():
         custom_agent_runtime._active_runs.pop(scene_name, None)
         custom_agent_runtime._cancel_events.pop(scene_name, None)
         custom_agent_runtime._stream_buffers.pop("new-run", None)
+
+
+def test_queued_finalizer_observes_new_chat_cancellation():
+    scene_name = "Scene-Finalizer-Cancel-Test"
+    event = threading.Event()
+    custom_agent_runtime._cancel_events[scene_name] = event
+
+    try:
+        assert custom_agent_runtime._was_cancelled(scene_name) is False
+        event.set()
+        assert custom_agent_runtime._was_cancelled(scene_name) is True
+    finally:
+        custom_agent_runtime._cancel_events.pop(scene_name, None)
 
 
 def test_timed_out_queued_blender_tool_is_not_executed_later(monkeypatch):

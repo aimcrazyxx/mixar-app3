@@ -9,15 +9,18 @@ Provides operators for connection management using JSON-RPC WebSocket.
 """
 
 from bpy.types import Operator
-
 from mixar.config.logging_config import get_logger
 
-from ...core import get_connection_manager, get_session_manager
-from ...core import populate_dev_session, DevDataProvider
-from ...core.sse_handler import cleanup_sse_handler
+from ...constants import DEV_MODE, SessionState
+from ...core import (
+    DevDataProvider,
+    get_connection_manager,
+    get_session_manager,
+    populate_dev_session,
+)
 from ...core.main_thread_executor import cleanup as flush_executor_queue
 from ...core.message_helpers import get_auth_token
-from ...constants import DEV_MODE, SessionState
+from ...core.sse_handler import cleanup_sse_handler
 
 logger = get_logger(__name__)
 
@@ -168,8 +171,6 @@ class MIXIE_CHAT_OT_new_session(Operator):
         session = get_session_manager()
         scene = context.scene
         scene_name = scene.name
-        from ...core.export_destination import clear_destination
-        clear_destination(session.get_session_id(scene))
 
         # Cancel any running session before clearing
         old_session_id = session.get_session_id(scene)
@@ -187,8 +188,18 @@ class MIXIE_CHAT_OT_new_session(Operator):
         # 3. Flush queued tool scripts
         flush_executor_queue()
 
-        # 4. Tell the backend to cancel the old session
-        if old_session_id:
+        # 4. Cancel the owner of the old session.  Direct-provider ids never
+        # reach the backend, while catalog-provider ids keep the existing
+        # /agent/cancel behavior.
+        custom_owned = False
+        custom_runtime = None
+        try:
+            from mixar.modules.byok.core import custom_agent_runtime as custom_runtime
+            custom_owned = custom_runtime.is_custom_session(old_session_id)
+            custom_runtime.cancel(scene_name)
+        except Exception as e:
+            logger.debug(f"custom session cancellation skipped: {e}")
+        if old_session_id and not custom_owned:
             send_cancel_request_async(old_session_id)
 
         # 5. Archive the current chat to local history before wiping it —
@@ -201,6 +212,8 @@ class MIXIE_CHAT_OT_new_session(Operator):
         except Exception as e:
             logger.error(f"Failed to archive chat before new session: {e}")
             self.report({'WARNING'}, "Could not save the chat to History")
+        if old_session_id and custom_runtime is not None:
+            custom_runtime.forget_session(old_session_id)
 
         # Clear messages and incremental markdown cache
         scene.mixie_chat_messages.clear()
@@ -325,12 +338,14 @@ class MIXIE_CHAT_OT_abort_session(Operator):
 
         # 5. Cancel the active execution lane. Direct custom providers run
         # locally; catalog providers keep the existing backend cancellation.
+        session_id = session.get_session_id(scene)
         try:
-            from mixar.modules.byok.core.custom_agent_runtime import cancel as cancel_custom
-            custom_cancelled = cancel_custom(scene_name)
+            from mixar.modules.byok.core import custom_agent_runtime
+            custom_owned = custom_agent_runtime.is_custom_session(session_id)
+            custom_agent_runtime.cancel(scene_name)
         except Exception:
-            custom_cancelled = False
-        if not custom_cancelled:
+            custom_owned = False
+        if not custom_owned:
             self._send_abort_request_async(session.get_session_id(scene))
 
         # 6. Reset state

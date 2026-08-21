@@ -122,6 +122,7 @@ def run_agent_loop(
     transcript = trim_context(messages, context_limit)
     debug = {
         "provider": "OpenAI Compatible",
+        "route": "direct-openai-compatible",
         "model": provider.config.model,
         "base_url": provider.config.base_url,
         "endpoint": "",

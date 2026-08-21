@@ -242,6 +242,7 @@ class MIXAR_BYOK_OT_custom_view_debug(Operator):
             report = {"error": "The debug report could not be decoded"}
         fields = (
             ("provider", "Provider"),
+            ("route", "Agent route"),
             ("model", "Model"),
             ("base_url", "Base URL"),
             ("endpoint", "Endpoint"),

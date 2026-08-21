@@ -16,8 +16,8 @@ import os
 
 import bpy
 from bpy.types import Operator
-
 from mixar.config.logging_config import get_logger
+
 from ...core import byok_client, model_suggestions
 
 logger = get_logger(__name__)
@@ -587,7 +587,7 @@ class MIXAR_BYOK_OT_codex_load_file(Operator):
         try:
             with open(path, "r", encoding="utf-8") as f:
                 content = f.read().strip()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("Codex auth.json read failed: %s", e)
             self.report({'ERROR'}, "Could not read ~/.codex/auth.json")
             return {'CANCELLED'}
@@ -681,6 +681,10 @@ class MIXAR_BYOK_OT_confirm_remove(Operator):
             _wipe_form_secrets(wm)
             wm.byok_dialog_state = 'IDLE'
             _redraw_mixie_chat_areas()
+            # A backend BYOK credential may still exist because the direct
+            # provider is intentionally a separate route.  Restore that
+            # authoritative server state after removing the local override.
+            byok_client.fetch_state(on_done=_on_fetch_done)
             return {'FINISHED'}
         wm.byok_dialog_state = 'SAVING'
         wm.byok_last_error = ''
@@ -733,7 +737,8 @@ def _on_fetch_done(success: bool, data, err):
     """
     try:
         wm = bpy.context.window_manager
-        if getattr(wm, 'byok_custom_enabled', False):
+        from mixar.modules.byok.core.custom_agent_runtime import is_active
+        if is_active(wm):
             return
         if success:
             _apply_cached_state(wm, data or {})

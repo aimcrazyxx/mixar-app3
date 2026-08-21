@@ -24,21 +24,21 @@ side of the contract:
     — dispatched by the C++ overlay with a ``session_id`` string prop
     (same pattern as slot-action clicks).
 
-Reopening restores the exact transcript into ``scene.mixie_chat_messages``
-and sets ``scene.mixie_session_id`` back, so the next message resumes the
-backend conversation (its LangGraph checkpoint) — nothing is re-uploaded.
+Reopening restores the exact transcript into ``scene.mixie_chat_messages``.
+Backend records also restore ``scene.mixie_session_id`` so the next message
+resumes the LangGraph checkpoint; direct-provider records start a fresh wire
+session because their local history is not a backend checkpoint.
 """
 
+from contextlib import suppress
 from datetime import datetime, timezone
 
 import bpy
 from bpy.props import BoolProperty, CollectionProperty, StringProperty
 from bpy.types import Operator, PropertyGroup
-
 from mixar.config.logging_config import get_logger
 
-from ...core import get_session_manager
-from ...core import chat_history
+from ...core import chat_history, get_session_manager
 from ...core.main_thread_executor import cleanup as flush_executor_queue
 from ...core.sse_handler import cleanup_sse_handler
 from ...core.ui_utils import redraw_chat_areas
@@ -119,7 +119,7 @@ def sync_history_entries(context) -> None:
     entries.clear()
     try:
         sessions = chat_history.list_sessions(user_email)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.debug(f"chat history list failed: {e}")
         sessions = []
     for meta in sessions:
@@ -212,7 +212,15 @@ class MIXIE_CHAT_OT_open_history_session(Operator):
         from ...core.queue_processor import cleanup_sse_queue_for_scene
         cleanup_sse_queue_for_scene(scene_name)
         flush_executor_queue()
-        if old_session_id:
+        custom_owned = False
+        custom_runtime = None
+        try:
+            from mixar.modules.byok.core import custom_agent_runtime as custom_runtime
+            custom_owned = custom_runtime.is_custom_session(old_session_id)
+            custom_runtime.cancel(scene_name)
+        except Exception as e:
+            logger.debug(f"custom history-session cancellation skipped: {e}")
+        if old_session_id and not custom_owned:
             send_cancel_request_async(old_session_id)
 
         # Save the outgoing chat before replacing it — switching must
@@ -222,6 +230,8 @@ class MIXIE_CHAT_OT_open_history_session(Operator):
         except Exception as e:
             logger.error(f"Failed to archive chat before switch: {e}")
             self.report({'WARNING'}, "Could not save the current chat to History")
+        if old_session_id and custom_runtime is not None:
+            custom_runtime.forget_session(old_session_id)
 
         count = chat_history.restore_into_scene(scene, record)
 
@@ -291,10 +301,8 @@ classes = (
 
 def register():
     for cls in classes:
-        try:
+        with suppress(ValueError):
             bpy.utils.register_class(cls)
-        except ValueError:
-            pass  # already registered (module reload)
 
     # Runtime mirror of ~/.mixar/chat_history read by the C++ overlay.
     # Session state, never persisted.
@@ -315,12 +323,8 @@ def register():
 
 def unregister():
     for attr in ("mixie_chat_history_entries", "mixie_chat_history_visible"):
-        try:
+        with suppress(Exception):
             delattr(bpy.types.WindowManager, attr)
-        except Exception:
-            pass
     for cls in reversed(classes):
-        try:
+        with suppress(Exception):
             bpy.utils.unregister_class(cls)
-        except Exception:
-            pass
