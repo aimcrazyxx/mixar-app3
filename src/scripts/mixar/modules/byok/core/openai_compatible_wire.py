@@ -15,10 +15,22 @@ from .provider_types import ProviderError
 _HEADER_NAME = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 
 
+def chat_messages(messages: list[dict]) -> list[dict]:
+    """Strip Mixar-only continuation metadata before Chat Completions."""
+    return [
+        {key: val for key, val in message.items() if not key.startswith("_mixar_")}
+        for message in messages
+    ]
+
+
 def responses_input(messages: list[dict]) -> list[dict]:
     """Translate Chat Completions history into Responses input items."""
     result = []
     for message in messages:
+        continuation = message.get("_mixar_responses_output")
+        if isinstance(continuation, list) and continuation:
+            result.extend(item for item in continuation if isinstance(item, dict))
+            continue
         role = message.get("role")
         if role == "tool":
             result.append(

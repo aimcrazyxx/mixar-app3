@@ -18,7 +18,6 @@ EXISTING wire payload shape (see generation_params/core/assemblers.py):
 import base64 as _b64
 
 from bpy.types import Operator
-
 from mixar.config.logging_config import get_logger
 from mixar.modules.moodboard.core.media_utils import is_still_item
 
@@ -152,11 +151,14 @@ class MIXIE_OT_model_gen_generate(Operator):
 
     def execute(self, context):
         from mixar.modules.common.generation_params import (
-            assemble_payload, collect_params, model_supports_multi_view,
+            assemble_payload,
+            collect_params,
+            model_supports_multi_view,
             resolve_service_key,
         )
         from mixar.modules.common.utils.image_utils import (
-            compress_for_service, compress_image_for_upload,
+            compress_for_service,
+            compress_image_for_upload,
         )
 
         scene = context.scene
@@ -294,11 +296,12 @@ class MIXIE_OT_model_gen_generate(Operator):
 
     def _execute_tripo_p1(self, context, tab, model):
         from mixar.modules.common.job_queue import (
-            create_scene_flag_listener, get_queue_with_listener,
+            create_scene_flag_listener,
+            get_queue_with_listener,
         )
         from mixar.modules.common.job_queue.constants import FEATURE_MODEL_3D
-        from mixar.modules.common.utils.image_utils import compress_image_for_upload
         from mixar.modules.common.secure_storage import get_secret
+        from mixar.modules.common.utils.image_utils import compress_image_for_upload
         from mixar.modules.moodboard.core.tripo_p1_job import TripoP1MultiViewJob
 
         key = get_secret('tripo_api_key')
@@ -337,6 +340,8 @@ class MIXIE_OT_model_gen_generate(Operator):
             pbr=bool(tab.tripo_pbr and tab.tripo_texture),
             face_limit=face_limit,
             model_seed=int(tab.tripo_model_seed),
+            texture_alignment=str(tab.tripo_texture_alignment),
+            orientation=str(tab.tripo_orientation),
         )
         listener = create_scene_flag_listener(
             "mixie_image_to_3d_is_generating",
@@ -394,4 +399,3 @@ def unregister():
     from bpy.utils import unregister_class
     for cls in reversed(classes):
         unregister_class(cls)
-

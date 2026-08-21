@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from mixar.modules.common.api.response import APIResponse
 from mixar.modules.common.job_queue import Job, JobState
 
-from .tripo_p1_client import TripoP1Client
+from .tripo_p1_client import TripoP1Client, TripoP1Error
 
 
 @dataclass
@@ -23,6 +23,8 @@ class TripoP1MultiViewJob(Job):
     pbr: bool = True
     face_limit: int = 0
     model_seed: int = 0
+    texture_alignment: str = "original_image"
+    orientation: str = "default"
     _model_url: str = field(default="", repr=False)
 
     def submit(self, on_success, on_error):
@@ -44,17 +46,23 @@ class TripoP1MultiViewJob(Job):
             client = None
             try:
                 client = TripoP1Client(key_snapshot)
-                tokens = {
-                    view: client.upload_image(data, f"{view}.jpg")
-                    for view, data in image_snapshot.items()
-                    if data
-                }
+                tokens = {}
+                for view, data in image_snapshot.items():
+                    if not data:
+                        continue
+                    if self.state == JobState.CANCELLED:
+                        raise TripoP1Error("Tripo generation cancelled")
+                    tokens[view] = client.upload_image(data, f"{view}.jpg")
+                if self.state == JobState.CANCELLED:
+                    raise TripoP1Error("Tripo generation cancelled")
                 task_id = client.create_multiview_task(
                     tokens,
                     texture=self.texture,
                     pbr=self.pbr,
                     face_limit=self.face_limit,
                     model_seed=self.model_seed,
+                    texture_alignment=self.texture_alignment,
+                    orientation=self.orientation,
                 )
                 self._model_url = client.wait_for_model(
                     task_id,

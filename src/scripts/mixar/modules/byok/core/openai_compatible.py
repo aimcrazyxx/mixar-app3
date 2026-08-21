@@ -7,23 +7,28 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, Optional
 
 import httpx
 
+from .openai_compatible_http import (
+    chat_stream,
+    responses_stream,
+)
+from .openai_compatible_http import (
+    request as http_request,
+)
 from .openai_compatible_parse import (
     parse_chat_response,
-    parse_chat_stream,
     parse_responses_response,
     response_json,
 )
 from .openai_compatible_wire import (
-    endpoint_url,
+    chat_messages,
     normalize_base_url,
     parse_custom_headers,
     responses_input,
-    user_error,
 )
 from .provider_types import (
     AIProvider,
@@ -36,6 +41,7 @@ _OPTIONAL_PARAMS = (
     "parallel_tool_calls",
     "reasoning_effort",
     "stream_options",
+    "stream",
     "reasoning",
     "temperature",
     "top_p",
@@ -60,6 +66,8 @@ class OpenAICompatibleConfig:
     vision: bool = True
     streaming: bool = True
     endpoint_mode: str = "auto"
+    max_retries: int = 2
+    retry_backoff: float = 0.5
 
     def __post_init__(self):
         self.base_url = normalize_base_url(self.base_url)
@@ -70,12 +78,18 @@ class OpenAICompatibleConfig:
         self.timeout = float(self.timeout)
         self.max_output_tokens = int(self.max_output_tokens)
         self.context_limit = int(self.context_limit)
+        self.max_retries = int(self.max_retries)
+        self.retry_backoff = float(self.retry_backoff)
         if self.timeout <= 0:
             raise ValueError("Timeout must be greater than zero")
         if self.max_output_tokens < 1:
             raise ValueError("Max output tokens must be at least 1")
         if self.context_limit < 0:
             raise ValueError("Context limit cannot be negative")
+        if not 0 <= self.max_retries <= 5:
+            raise ValueError("Max retries must be between 0 and 5")
+        if not 0 <= self.retry_backoff <= 30:
+            raise ValueError("Retry backoff must be between 0 and 30 seconds")
         if self.temperature is not None:
             self.temperature = float(self.temperature)
             if not 0 <= self.temperature <= 2:
@@ -95,9 +109,7 @@ class OpenAICompatibleProvider(AIProvider):
         self.capabilities = ProviderCapabilities(
             supports_tools=config.tool_calling,
             supports_vision=config.vision,
-            supports_streaming=(
-                config.streaming and config.endpoint_mode != "responses"
-            ),
+            supports_streaming=config.streaming,
             supports_reasoning=bool(config.reasoning_effort),
             supports_responses_api=True,
         )
@@ -117,27 +129,17 @@ class OpenAICompatibleProvider(AIProvider):
     def close(self) -> None:
         self._client.close()
 
+    def _set_capability(self, name: str, value: bool) -> None:
+        if getattr(self.capabilities, name) != value:
+            self.capabilities = replace(self.capabilities, **{name: value})
+
+    @staticmethod
+    def _cancelled(cancel_event) -> None:
+        if cancel_event is not None and cancel_event.is_set():
+            raise ProviderError("Agent run cancelled", category="cancelled")
+
     def _request(self, method: str, endpoint: str, **kwargs) -> httpx.Response:
-        try:
-            response = self._client.request(
-                method, endpoint_url(self.config.base_url, endpoint), **kwargs
-            )
-        except httpx.TimeoutException as exc:
-            raise ProviderError("Connection timed out", category="timeout") from exc
-        except httpx.HTTPError as exc:
-            raise ProviderError(
-                f"Connection failed: {type(exc).__name__}", category="connection"
-            ) from exc
-        if response.status_code >= 400:
-            detail = ""
-            try:
-                body = response.json()
-                err = body.get("error", body) if isinstance(body, dict) else body
-                detail = err.get("message", "") if isinstance(err, dict) else str(err)
-            except ValueError:
-                detail = response.text[:400]
-            raise user_error(response.status_code, self._redact_secrets(detail))
-        return response
+        return http_request(self, method, endpoint, **kwargs)
 
     def _redact_secrets(self, detail: str) -> str:
         safe = str(detail or "")
@@ -153,9 +155,19 @@ class OpenAICompatibleProvider(AIProvider):
         return response_json(response)
 
     def list_models(self) -> list[str]:
-        response = self._request("GET", "models")
+        try:
+            response = self._request("GET", "models")
+        except ProviderError as exc:
+            if exc.status_code in {404, 405}:
+                self._set_capability("supports_model_listing", False)
+            raise
         data = self._response_json(response)
         rows = data.get("data", [])
+        if not isinstance(rows, list):
+            raise ProviderError(
+                "Provider model list field 'data' must be a list",
+                status_code=response.status_code,
+            )
         return sorted(
             {
                 str(row.get("id"))
@@ -224,7 +236,7 @@ class OpenAICompatibleProvider(AIProvider):
     ) -> dict:
         payload = {
             "model": self.config.model,
-            "messages": messages,
+            "messages": chat_messages(messages),
             "max_tokens": self.config.max_output_tokens,
             "stream": stream,
         }
@@ -259,9 +271,26 @@ class OpenAICompatibleProvider(AIProvider):
             )
         )
 
-    def generate(self, messages, *, tools=None, on_text_delta=None) -> ProviderResponse:
+    def generate(
+        self,
+        messages,
+        *,
+        tools=None,
+        on_text_delta=None,
+        cancel_event=None,
+    ) -> ProviderResponse:
+        self._cancelled(cancel_event)
         if self.config.endpoint_mode == "responses":
-            return self._generate_responses(messages, tools)
+            return self._generate_responses(
+                messages, tools, on_text_delta, cancel_event
+            )
+        if (
+            self.config.endpoint_mode == "auto"
+            and not self.capabilities.supports_chat_completions
+        ):
+            return self._generate_responses(
+                messages, tools, on_text_delta, cancel_event
+            )
         stream = bool(self.config.streaming)
         payload = self._payload(messages, tools, stream)
         degraded = []
@@ -269,9 +298,11 @@ class OpenAICompatibleProvider(AIProvider):
         while True:
             try:
                 if stream:
-                    result = self._generate_stream(payload, on_text_delta)
+                    result = self._generate_stream(
+                        payload, on_text_delta, cancel_event
+                    )
                 else:
-                    result = self._generate_json(payload)
+                    result = self._generate_json(payload, cancel_event)
                 result.degraded_parameters = degraded + result.degraded_parameters
                 return result
             except ProviderError as exc:
@@ -279,7 +310,10 @@ class OpenAICompatibleProvider(AIProvider):
                     404,
                     405,
                 }:
-                    result = self._generate_responses(messages, tools)
+                    self._set_capability("supports_chat_completions", False)
+                    result = self._generate_responses(
+                        messages, tools, on_text_delta, cancel_event
+                    )
                     result.degraded_parameters = degraded + result.degraded_parameters
                     return result
                 if (
@@ -301,6 +335,7 @@ class OpenAICompatibleProvider(AIProvider):
                     payload["stream"] = False
                     payload.pop("stream_options", None)
                     degraded.append("streaming")
+                    self._set_capability("supports_streaming", False)
                     continue
                 param = (
                     self._unsupported_parameter(exc, payload)
@@ -311,23 +346,43 @@ class OpenAICompatibleProvider(AIProvider):
                     raise
                 payload.pop(param, None)
                 degraded.append(param)
+                self._record_rejected_capability(param)
                 if param == "stream_options":
                     continue
                 if param == "tools":
                     payload.pop("parallel_tool_calls", None)
 
-    def _generate_responses(self, messages, tools) -> ProviderResponse:
+    def _record_rejected_capability(self, parameter: str) -> None:
+        mapping = {
+            "tools": "supports_tools",
+            "parallel_tool_calls": "supports_parallel_tools",
+            "reasoning": "supports_reasoning",
+            "reasoning_effort": "supports_reasoning",
+            "temperature": "supports_temperature",
+            "top_p": "supports_top_p",
+        }
+        capability = mapping.get(parameter)
+        if capability:
+            self._set_capability(capability, False)
+
+    def _generate_responses(
+        self, messages, tools, on_text_delta=None, cancel_event=None
+    ) -> ProviderResponse:
         payload = {
             "model": self.config.model,
             "input": responses_input(messages),
             "max_output_tokens": self.config.max_output_tokens,
         }
+        if self.config.streaming and self.capabilities.supports_streaming:
+            payload["stream"] = True
         if tools and self.capabilities.supports_tools:
             payload["tools"] = [
                 {"type": "function", **item.get("function", {})}
                 for item in tools
                 if item.get("type") == "function"
             ]
+            if self.capabilities.supports_parallel_tools:
+                payload["parallel_tool_calls"] = True
         if self.config.temperature is not None:
             payload["temperature"] = self.config.temperature
         if self.config.top_p is not None:
@@ -338,9 +393,20 @@ class OpenAICompatibleProvider(AIProvider):
         degraded = []
         while True:
             try:
-                response = self._request("POST", "responses", json=payload)
-                break
+                if payload.get("stream"):
+                    result = self._generate_responses_stream(
+                        payload, on_text_delta, cancel_event
+                    )
+                else:
+                    response = self._request(
+                        "POST", "responses", json=payload, cancel_event=cancel_event
+                    )
+                    result = self._parse_responses_response(response)
+                result.degraded_parameters = degraded + result.degraded_parameters
+                return result
             except ProviderError as exc:
+                if exc.status_code in {404, 405}:
+                    self._set_capability("supports_responses_api", False)
                 parameter = (
                     self._unsupported_parameter(exc, payload)
                     if exc.status_code == 400
@@ -350,56 +416,42 @@ class OpenAICompatibleProvider(AIProvider):
                     raise
                 payload.pop(parameter, None)
                 degraded.append(parameter)
-
-        return self._parse_responses_response(response, degraded)
+                self._record_rejected_capability(parameter)
+                if parameter == "tools":
+                    payload.pop("parallel_tool_calls", None)
+                if parameter == "stream_options":
+                    continue
+                if parameter == "stream":
+                    self._set_capability("supports_streaming", False)
 
     def _parse_responses_response(
         self, response: httpx.Response, degraded=None
     ) -> ProviderResponse:
-        return parse_responses_response(response, self.config.base_url, degraded)
+        return parse_responses_response(
+            response,
+            self.config.base_url,
+            degraded,
+            self._redact_secrets,
+        )
 
-    def _generate_json(self, payload: dict) -> ProviderResponse:
-        response = self._request("POST", "chat/completions", json=payload)
+    def _generate_json(self, payload: dict, cancel_event=None) -> ProviderResponse:
+        response = self._request(
+            "POST", "chat/completions", json=payload, cancel_event=cancel_event
+        )
         return self._parse_chat_response(response)
 
     def _parse_chat_response(self, response: httpx.Response) -> ProviderResponse:
         return parse_chat_response(response, self.config.base_url)
 
     def _generate_stream(
-        self, payload: dict, on_text_delta: Optional[Callable[[str], None]]
+        self,
+        payload: dict,
+        on_text_delta: Optional[Callable[[str], None]],
+        cancel_event=None,
     ) -> ProviderResponse:
-        url = endpoint_url(self.config.base_url, "chat/completions")
-        try:
-            with self._client.stream("POST", url, json=payload) as response:
-                if response.status_code >= 400:
-                    response.read()
-                    detail = response.text[:400]
-                    try:
-                        data = response.json()
-                        detail = (data.get("error") or {}).get("message", detail)
-                    except ValueError:
-                        # Non-JSON provider errors are valid; keep the bounded
-                        # response text captured above instead of hiding it.
-                        data = None
-                    raise user_error(
-                        response.status_code,
-                        self._redact_secrets(detail),
-                    )
-                content_type = response.headers.get("content-type", "").lower()
-                if "application/json" in content_type:
-                    response.read()
-                    result = self._parse_chat_response(response)
-                    result.degraded_parameters = ["streaming"]
-                    return result
-                return parse_chat_stream(
-                    response,
-                    url,
-                    on_text_delta,
-                    redact_detail=self._redact_secrets,
-                )
-        except httpx.TimeoutException as exc:
-            raise ProviderError("Connection timed out", category="timeout") from exc
-        except httpx.HTTPError as exc:
-            raise ProviderError(
-                f"Connection failed: {type(exc).__name__}", category="connection"
-            ) from exc
+        return chat_stream(self, payload, on_text_delta, cancel_event)
+
+    def _generate_responses_stream(
+        self, payload: dict, on_text_delta=None, cancel_event=None
+    ) -> ProviderResponse:
+        return responses_stream(self, payload, on_text_delta, cancel_event)

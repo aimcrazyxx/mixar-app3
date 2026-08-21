@@ -67,7 +67,13 @@ def draw(box, col, wm, draw_tall_prop):
         caps.prop(wm, "byok_custom_streaming")
         adv.prop(wm, "byok_custom_debug_enabled")
         if wm.byok_custom_debug_enabled and wm.byok_custom_debug_report:
-            adv.operator("mixar_byok.custom_copy_debug", icon="COPYDOWN")
+            debug_actions = adv.row(align=True)
+            debug_actions.operator(
+                "mixar_byok.custom_view_debug", text="View debug report", icon="INFO"
+            )
+            debug_actions.operator(
+                "mixar_byok.custom_copy_debug", text="Copy", icon="COPYDOWN"
+            )
     hint = box.row()
     hint.enabled = False
     hint.label(

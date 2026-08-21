@@ -226,9 +226,62 @@ class MIXAR_BYOK_OT_custom_copy_debug(Operator):
         return {"FINISHED"}
 
 
+class MIXAR_BYOK_OT_custom_view_debug(Operator):
+    bl_idname = "mixar_byok.custom_view_debug"
+    bl_label = "AI Agent Debug"
+    bl_options = {"INTERNAL"}
+
+    def invoke(self, context, _event):
+        return context.window_manager.invoke_props_dialog(self, width=720)
+
+    def draw(self, context):
+        raw = context.window_manager.byok_custom_debug_report
+        try:
+            report = json.loads(raw) if raw else {}
+        except (TypeError, ValueError):
+            report = {"error": "The debug report could not be decoded"}
+        fields = (
+            ("provider", "Provider"),
+            ("model", "Model"),
+            ("base_url", "Base URL"),
+            ("endpoint", "Endpoint"),
+            ("context_tokens_approx", "Approx. context tokens"),
+            ("message_count", "Messages"),
+            ("tool_count", "Available tools"),
+            ("request_count", "Provider requests"),
+            ("iterations", "Agent iterations"),
+            ("duration_ms", "Duration (ms)"),
+            ("http_status", "HTTP status"),
+            ("finish_reason", "Finish reason"),
+            ("reasoning_present", "Reasoning preserved"),
+        )
+        col = self.layout.column(align=True)
+        for key, label in fields:
+            row = col.row()
+            row.label(text=label)
+            row.label(text=str(report.get(key, "")))
+        for key, label in (
+            ("capability_warnings", "Capability notices"),
+            ("degraded_parameters", "Capability fallbacks"),
+            ("usage", "Usage"),
+            ("tool_calls", "Tool calls"),
+            ("tool_results", "Tool results"),
+            ("error", "Error"),
+        ):
+            value = report.get(key)
+            if value not in (None, "", [], {}):
+                box = col.box()
+                box.label(text=label)
+                box.label(text=json.dumps(value, ensure_ascii=False)[:1000])
+
+    def execute(self, _context):
+        return {"FINISHED"}
+
+
 classes = (
     MIXAR_BYOK_OT_custom_toggle_key,
     MIXAR_BYOK_OT_custom_test,
     MIXAR_BYOK_OT_custom_fetch_models,
+    MIXAR_BYOK_OT_custom_view_debug,
     MIXAR_BYOK_OT_custom_copy_debug,
 )

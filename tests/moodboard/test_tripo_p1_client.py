@@ -50,6 +50,8 @@ def test_upload_create_poll_uses_official_p1_v3_schema():
             pbr=True,
             face_limit=500,
             model_seed=7,
+            texture_alignment="geometry",
+            orientation="align_image",
         )
         url = client.wait_for_model(task_id, interval=0.01)
     finally:
@@ -58,8 +60,10 @@ def test_upload_create_poll_uses_official_p1_v3_schema():
     assert created == {
         "inputs": [{"front": "file-front"}, {"left": "file-left"}],
         "model": "P1-20260311",
-        "texture": True,
-        "pbr": True,
+        "texture": False,
+        "pbr": False,
+        "texture_alignment": "geometry",
+        "orientation": "align_image",
         "face_limit": 500,
         "model_seed": 7,
     }
@@ -88,12 +92,30 @@ def test_upload_rejects_unsupported_image_bytes_before_request():
 
     client = TripoP1Client("secret", transport=httpx.MockTransport(handler))
     try:
-        with pytest.raises(ValueError, match="PNG or JPEG"):
+        with pytest.raises(ValueError, match="PNG, JPEG, or WebP"):
             client.upload_image(b"not-an-image", "front.png")
     finally:
         client.close()
 
     assert requested == []
+
+
+def test_upload_accepts_webp_and_uses_matching_content_type():
+    seen = {}
+
+    def handler(request):
+        seen["body"] = request.content
+        return httpx.Response(200, json={"code": 0, "data": {"file_token": "webp"}})
+
+    client = TripoP1Client("secret", transport=httpx.MockTransport(handler))
+    try:
+        token = client.upload_image(b"RIFF\x00\x00\x00\x00WEBPdata", "front.jpg")
+    finally:
+        client.close()
+
+    assert token == "webp"
+    assert b"front.webp" in seen["body"]
+    assert b"Content-Type: image/webp" in seen["body"]
 
 
 def test_poll_failure_is_user_visible():
@@ -102,13 +124,33 @@ def test_poll_failure_is_user_visible():
             200,
             json={
                 "code": 0,
-                "data": {"status": "failed", "message": "bad views"},
+                "data": {
+                    "status": "failed",
+                    "error_code": 4221,
+                    "error_message": "bad views",
+                },
             },
         )
 
     client = TripoP1Client("secret", transport=httpx.MockTransport(handler))
     try:
         with pytest.raises(TripoP1Error, match="bad views"):
+            client.wait_for_model("task", interval=0.01)
+    finally:
+        client.close()
+
+
+def test_poll_rejects_unknown_status_instead_of_waiting_until_timeout():
+    client = TripoP1Client(
+        "secret",
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200, json={"code": 0, "data": {"status": "mystery"}}
+            )
+        ),
+    )
+    try:
+        with pytest.raises(TripoP1Error, match="unknown task status"):
             client.wait_for_model("task", interval=0.01)
     finally:
         client.close()

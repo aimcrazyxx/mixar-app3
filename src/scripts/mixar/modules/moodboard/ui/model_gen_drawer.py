@@ -13,9 +13,13 @@ Basic/Pro subtab UI when the catalog isn't loaded.
 """
 
 from .sidebar_ui_helpers import (
-    draw_section_box, draw_section_separator, draw_prompt_section,
-    draw_moodboard_image_toggle, draw_generate_footer,
-    draw_image_info_card, draw_image_thumbnail,
+    draw_generate_footer,
+    draw_image_info_card,
+    draw_image_thumbnail,
+    draw_moodboard_image_toggle,
+    draw_prompt_section,
+    draw_section_box,
+    draw_section_separator,
 )
 
 # Per-mode generate-footer routing:
@@ -42,7 +46,8 @@ def _model_gen_catalog_ready():
     """True when the catalog has model_gen services (drives the new UI)."""
     try:
         from mixar.bootstrap.generation_catalog_cache import (
-            get_services, is_loaded,
+            get_services,
+            is_loaded,
         )
         return is_loaded() and bool(get_services("model_gen"))
     except Exception:
@@ -55,7 +60,8 @@ def _draw_model_gen(layout, context):
     tab = scene.mixie_moodboard_sidebar.tab_image_to_3d
 
     from mixar.modules.common.generation_params import (
-        draw_capability_selector, resolve_service_key,
+        draw_capability_selector,
+        resolve_service_key,
     )
     service_key = resolve_service_key(
         "model_gen", getattr(tab, "mode", "")
@@ -125,6 +131,9 @@ def _draw_model_gen(layout, context):
         col.prop(tab, 'tripo_texture')
         pbr = col.row(); pbr.enabled = tab.tripo_texture
         pbr.prop(tab, 'tripo_pbr')
+        textured = col.column(align=True); textured.enabled = tab.tripo_texture
+        textured.prop(tab, 'tripo_texture_alignment')
+        textured.prop(tab, 'tripo_orientation')
         col.prop(tab, 'tripo_face_limit')
         col.prop(tab, 'tripo_model_seed')
         key = col.row(align=True)

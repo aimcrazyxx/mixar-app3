@@ -26,7 +26,13 @@ def _image_upload_metadata(image_bytes: bytes, filename: str) -> tuple[str, str]
         return f"{base}.png", "image/png"
     if image_bytes.startswith(b"\xff\xd8\xff"):
         return f"{base}.jpg", "image/jpeg"
-    raise ValueError(f"{filename or 'image'} must contain PNG or JPEG data")
+    if (
+        len(image_bytes) >= 12
+        and image_bytes.startswith(b"RIFF")
+        and image_bytes[8:12] == b"WEBP"
+    ):
+        return f"{base}.webp", "image/webp"
+    raise ValueError(f"{filename or 'image'} must contain PNG, JPEG, or WebP data")
 
 
 def _message(response: httpx.Response) -> str:
@@ -114,12 +120,19 @@ class TripoP1Client:
         pbr=True,
         face_limit=0,
         model_seed=0,
+        texture_alignment="original_image",
+        orientation="default",
     ) -> str:
         clean = {key: value for key, value in tokens.items() if value}
         if "front" not in clean:
             raise ValueError("Front view is required")
         if len(clean) < 2:
             raise ValueError("Tripo P1 requires front plus at least one other view")
+        if texture_alignment not in {"original_image", "geometry"}:
+            raise ValueError("Invalid Tripo texture alignment")
+        if orientation not in {"default", "align_image"}:
+            raise ValueError("Invalid Tripo orientation")
+        texture = bool(texture)
         payload = {
             "inputs": [
                 {view: clean[view]}
@@ -127,8 +140,10 @@ class TripoP1Client:
                 if view in clean
             ],
             "model": TRIPO_P1_MODEL,
-            "texture": bool(texture or pbr),
-            "pbr": bool(pbr),
+            "texture": texture,
+            "pbr": bool(pbr and texture),
+            "texture_alignment": texture_alignment,
+            "orientation": orientation,
         }
         if face_limit:
             if not 50 <= int(face_limit) <= 20000:
@@ -172,12 +187,18 @@ class TripoP1Client:
                 ):
                     raise TripoP1Error("Tripo returned an invalid model download URL")
                 return str(url)
-            if status in {"failed", "cancelled", "unknown"}:
+            if status in {"failed", "cancelled", "banned"}:
                 raise TripoP1Error(
                     self._safe_detail(
-                        data.get("message")
+                        data.get("error_message")
+                        or data.get("message")
                         or data.get("error")
+                        or data.get("error_code")
                         or f"Tripo task {status}"
                     )
+                )
+            if status not in {"queued", "running"}:
+                raise TripoP1Error(
+                    f"Tripo returned an unknown task status: {status or 'empty'}"
                 )
             time.sleep(max(0.05, float(interval)))

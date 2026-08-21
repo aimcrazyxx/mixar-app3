@@ -67,8 +67,18 @@ def trim_context(messages: list[dict], limit: int) -> list[dict]:
             groups[-1].append(message)
         else:
             groups.append([message])
-    kept_groups = groups[-1:]  # current request is never dropped
-    for group in reversed(groups[:-1]):
+    current_group = max(
+        (
+            index
+            for index, group in enumerate(groups)
+            if any(message.get("role") == "user" for message in group)
+        ),
+        default=max(0, len(groups) - 1),
+    )
+    # Keep the current user request and every assistant/tool exchange after it,
+    # even when that required set itself exceeds the configured soft limit.
+    kept_groups = groups[current_group:]
+    for group in reversed(groups[:current_group]):
         candidate_groups = [group, *kept_groups]
         candidate = system + [item for block in candidate_groups for item in block]
         if approximate_tokens(candidate, []) > limit:
@@ -82,6 +92,10 @@ def trim_context(messages: list[dict], limit: int) -> list[dict]:
 
 def _assistant_wire(response) -> dict:
     message = {"role": "assistant", "content": response.content or ""}
+    if response.reasoning_content:
+        message["reasoning_content"] = response.reasoning_content
+    if response.continuation_items:
+        message["_mixar_responses_output"] = response.continuation_items
     if response.tool_calls:
         message["tool_calls"] = [
             {
@@ -121,6 +135,10 @@ def run_agent_loop(
         "http_status": 0,
         "finish_reason": "",
         "degraded_parameters": [],
+        "capability_warnings": [],
+        "usage": [],
+        "reasoning_present": False,
+        "request_count": 0,
     }
     started = time.monotonic()
     final_text = ""
@@ -133,15 +151,39 @@ def run_agent_loop(
                 transcript,
                 tools=tools or None,
                 on_text_delta=on_text_delta,
+                cancel_event=cancel_event,
             )
+            degraded = list(debug["degraded_parameters"])
+            for parameter in response.degraded_parameters:
+                if parameter not in degraded:
+                    degraded.append(parameter)
+            warnings = list(debug["capability_warnings"])
+            warning_map = {
+                "tools": "The provider rejected tool calling; Blender actions could not be executed.",
+                "reasoning": "The provider rejected the configured reasoning mode.",
+                "reasoning_effort": "The provider rejected the configured reasoning effort.",
+            }
+            for parameter in response.degraded_parameters:
+                warning = warning_map.get(parameter)
+                if warning and warning not in warnings:
+                    warnings.append(warning)
             debug.update(
                 {
                     "endpoint": response.endpoint,
                     "http_status": response.status_code,
                     "finish_reason": response.finish_reason,
-                    "degraded_parameters": response.degraded_parameters,
+                    "degraded_parameters": degraded,
+                    "capability_warnings": warnings,
+                    "reasoning_present": bool(
+                        debug["reasoning_present"] or response.reasoning_content
+                    ),
+                    "request_count": debug["request_count"] + 1,
                 }
             )
+            if response.usage:
+                debug["usage"].append(
+                    {"iteration": iteration, "values": response.usage}
+                )
             for call_index, call in enumerate(response.tool_calls):
                 if not call.id:
                     call.id = f"call_{iteration}_{call_index}"
@@ -150,6 +192,10 @@ def run_agent_loop(
                 final_text = response.content.strip()
                 if not final_text:
                     final_text = "The provider returned an empty response."
+                if warnings:
+                    final_text += "\n\nProvider capability notice: " + " ".join(
+                        warnings
+                    )
                 break
 
             for call in response.tool_calls:

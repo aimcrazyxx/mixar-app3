@@ -119,6 +119,83 @@ def test_list_models_and_parameter_fallback_are_conservative():
     assert result.content == "ok"
     assert result.degraded_parameters == ["temperature"]
     assert "temperature" in payloads[0] and "temperature" not in payloads[1]
+    assert provider.capabilities.supports_temperature is False
+
+
+def test_model_listing_rejects_malformed_success_payload():
+    provider = OpenAICompatibleProvider(
+        OpenAICompatibleConfig("https://api.example.test", "key", "model"),
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(200, json={"data": {"id": "wrong"}})
+        ),
+    )
+    try:
+        with pytest.raises(ProviderError, match="must be a list"):
+            provider.list_models()
+    finally:
+        provider.close()
+
+
+def test_transient_http_errors_are_retried_with_a_bound():
+    attempts = []
+
+    def handler(_request):
+        attempts.append(1)
+        if len(attempts) < 3:
+            return httpx.Response(503, json={"error": {"message": "temporary"}})
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]
+            },
+        )
+
+    provider = OpenAICompatibleProvider(
+        OpenAICompatibleConfig(
+            "https://api.example.test",
+            "key",
+            "model",
+            streaming=False,
+            retry_backoff=0,
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        result = provider.generate([{"role": "user", "content": "hello"}])
+    finally:
+        provider.close()
+
+    assert result.content == "ok"
+    assert len(attempts) == 3
+
+
+def test_retry_backoff_is_cancellable():
+    cancelled = threading.Event()
+    timer = threading.Timer(0.01, cancelled.set)
+    provider = OpenAICompatibleProvider(
+        OpenAICompatibleConfig(
+            "https://api.example.test",
+            "key",
+            "model",
+            streaming=False,
+            retry_backoff=30,
+        ),
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(429, json={"error": {"message": "busy"}})
+        ),
+    )
+    timer.start()
+    try:
+        with pytest.raises(ProviderError) as error:
+            provider.generate(
+                [{"role": "user", "content": "hello"}],
+                cancel_event=cancelled,
+            )
+    finally:
+        timer.cancel()
+        provider.close()
+
+    assert error.value.category == "cancelled"
 
 
 def test_auto_endpoint_falls_back_to_responses_only_on_missing_chat_endpoint():
@@ -382,6 +459,169 @@ def test_streaming_reassembles_text_and_fragmented_tool_call():
     assert result.usage == {"total_tokens": 12}
     assert result.tool_calls == [
         ToolCall("call-1", "execute_blender_python", '{"script":"inspect"}')
+    ]
+
+
+def test_chat_reasoning_is_returned_to_model_after_tool_execution():
+    payloads = []
+
+    def handler(request):
+        payload = json.loads(request.content)
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "",
+                                "reasoning_content": "inspect first",
+                                "tool_calls": [
+                                    {
+                                        "id": "call-1",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "execute_blender_python",
+                                            "arguments": '{"script":"inspect"}',
+                                        },
+                                    }
+                                ],
+                            },
+                            "finish_reason": "tool_calls",
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"content": "verified"}, "finish_reason": "stop"}
+                ]
+            },
+        )
+
+    provider = OpenAICompatibleProvider(
+        OpenAICompatibleConfig(
+            "https://api.example.test", "key", "model", streaming=False
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        result = run_agent_loop(
+            provider,
+            [{"role": "user", "content": "inspect"}],
+            lambda _name, _args: {"success": True, "result": "ok"},
+        )
+    finally:
+        provider.close()
+
+    assistant = next(
+        message for message in payloads[1]["messages"] if message["role"] == "assistant"
+    )
+    assert assistant["reasoning_content"] == "inspect first"
+    assert result.text == "verified"
+    assert result.debug["reasoning_present"] is True
+
+
+def test_responses_stream_preserves_reasoning_tool_state_usage_and_deltas():
+    payloads = []
+    deltas = []
+    reasoning_item = {
+        "id": "rs-1",
+        "type": "reasoning",
+        "summary": [{"type": "summary_text", "text": "inspect first"}],
+    }
+    call_item = {
+        "id": "fc-1",
+        "type": "function_call",
+        "call_id": "call-1",
+        "name": "execute_blender_python",
+        "arguments": '{"script":"inspect"}',
+    }
+
+    def sse(events):
+        content = "".join(f"data: {json.dumps(event)}\n\n" for event in events)
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=(content + "data: [DONE]\n\n").encode(),
+        )
+
+    def handler(request):
+        payload = json.loads(request.content)
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return sse(
+                [
+                    {"type": "response.output_text.delta", "delta": "Inspecting. "},
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "status": "completed",
+                            "output": [reasoning_item, call_item],
+                            "usage": {"total_tokens": 10},
+                        },
+                    },
+                ]
+            )
+        return sse(
+            [
+                {"type": "response.output_text.delta", "delta": "Done."},
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "status": "completed",
+                        "output": [
+                            {
+                                "type": "message",
+                                "content": [
+                                    {"type": "output_text", "text": "Done."}
+                                ],
+                            }
+                        ],
+                        "usage": {"total_tokens": 7},
+                    },
+                },
+            ]
+        )
+
+    provider = OpenAICompatibleProvider(
+        OpenAICompatibleConfig(
+            "https://api.example.test",
+            "key",
+            "model",
+            endpoint_mode="responses",
+            reasoning_effort="high",
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        result = run_agent_loop(
+            provider,
+            [{"role": "user", "content": "inspect"}],
+            lambda _name, _args: {"success": True, "result": "ok"},
+            on_text_delta=deltas.append,
+        )
+    finally:
+        provider.close()
+
+    assert payloads[0]["stream"] is True
+    assert reasoning_item in payloads[1]["input"]
+    assert call_item in payloads[1]["input"]
+    assert {
+        "type": "function_call_output",
+        "call_id": "call-1",
+        "output": '{"success": true, "result": "ok"}',
+    } in payloads[1]["input"]
+    assert deltas == ["Inspecting. ", "Done."]
+    assert result.text == "Done."
+    assert result.debug["request_count"] == 2
+    assert result.debug["reasoning_present"] is True
+    assert [item["values"]["total_tokens"] for item in result.debug["usage"]] == [
+        10,
+        7,
     ]
 
 
@@ -681,6 +921,32 @@ def test_context_trim_keeps_contiguous_recent_history_and_tool_group():
     assert all("old " not in str(message.get("content")) for message in trimmed)
 
 
+def test_context_trim_never_drops_current_request_after_tool_calls():
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "previous " * 500},
+        {"role": "assistant", "content": "old answer"},
+        {"role": "user", "content": "current build request"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "one", "function": {"name": "inspect"}}],
+        },
+        {"role": "tool", "tool_call_id": "one", "content": "scene state"},
+    ]
+
+    trimmed = trim_context(messages, 80)
+
+    assert [message["role"] for message in trimmed] == [
+        "system",
+        "user",
+        "assistant",
+        "tool",
+    ]
+    assert trimmed[1]["content"] == "current build request"
+    assert "previous" not in str(trimmed)
+
+
 def test_debug_report_redacts_nested_secrets():
     report = debug_to_json(
         {
@@ -706,6 +972,7 @@ def test_compatible_provider_modules_respect_project_line_limit():
 
     for filename in (
         "openai_compatible.py",
+        "openai_compatible_http.py",
         "openai_compatible_parse.py",
         "openai_compatible_wire.py",
     ):
@@ -852,3 +1119,25 @@ def test_agent_synthesizes_missing_tool_call_id():
     tool = next(message for message in result.messages if message.get("role") == "tool")
     assert assistant["tool_calls"][0]["id"] == "call_1_0"
     assert tool["tool_call_id"] == "call_1_0"
+
+
+def test_important_capability_degradation_is_visible_to_user():
+    provider = FakeProvider(
+        [
+            ProviderResponse(
+                content="I can only explain the steps.",
+                finish_reason="stop",
+                degraded_parameters=["tools", "reasoning_effort"],
+            )
+        ]
+    )
+
+    result = run_agent_loop(
+        provider,
+        [{"role": "user", "content": "build the scene"}],
+        lambda _name, _args: {"success": True},
+    )
+
+    assert "tool calling" in result.text
+    assert "reasoning effort" in result.text
+    assert len(result.debug["capability_warnings"]) == 2

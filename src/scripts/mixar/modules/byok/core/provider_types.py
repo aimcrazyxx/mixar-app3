@@ -34,6 +34,8 @@ class ToolCall:
 class ProviderResponse:
     content: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
+    reasoning_content: str = ""
+    continuation_items: list[dict[str, Any]] = field(default_factory=list)
     finish_reason: str = ""
     endpoint: str = ""
     status_code: int = 0
@@ -65,5 +67,6 @@ class AIProvider:
         *,
         tools: Optional[list[dict]] = None,
         on_text_delta: Optional[Callable[[str], None]] = None,
+        cancel_event=None,
     ) -> ProviderResponse:
         raise NotImplementedError
