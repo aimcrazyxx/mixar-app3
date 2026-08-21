@@ -16,12 +16,22 @@ if(CMAKE_HOST_WIN32)
   set(CMAKE_C_FLAGS "/DWIN32 /D_WINDOWS /W3" CACHE STRING "C compiler flags" FORCE)
 endif()
 
-# Enable CUDA support for Cycles rendering
+# Enable CUDA device support for Cycles. The Windows build script turns this
+# OFF explicitly when nvcc is unavailable.
 set(WITH_CYCLES_DEVICE_CUDA ON CACHE BOOL "Enable Cycles NVIDIA CUDA compute support" FORCE)
-set(WITH_CYCLES_CUDA_BINARIES ON CACHE BOOL "Build Cycles NVIDIA CUDA binaries" FORCE)
+
+# IMPORTANT: Blender defaults WITH_CYCLES_CUDA_BINARIES to OFF. Do not force it
+# ON here. Forcing CUDA binaries without a CUDA toolkit leaves CUDA_VERSION
+# empty and Blender's Cycles CMake code expands `if(${CUDA_VERSION} EQUAL ...)`
+# to `if(EQUAL ...)`, which is a fatal CMake syntax error on CI runners.
+# CUDA device support still works when available; precompiled CUDA kernels can
+# be enabled explicitly by a build environment that actually provides nvcc.
+set(WITH_CYCLES_CUDA_BINARIES OFF CACHE BOOL "Build Cycles NVIDIA CUDA binaries" FORCE)
+
 set(WITH_CUDA_DYNLOAD ON CACHE BOOL "Dynamically load CUDA libraries at runtime" FORCE)
 
-# Enable OptiX support for Cycles ray-tracing (requires NVIDIA OptiX SDK)
+# Enable OptiX support for Cycles ray-tracing (requires NVIDIA OptiX SDK).
+# The Windows build script turns this OFF explicitly when the SDK is unavailable.
 set(WITH_CYCLES_DEVICE_OPTIX ON CACHE BOOL "Enable Cycles NVIDIA OptiX support" FORCE)
 
 # sccache compiler launcher - auto-enabled when sccache is on PATH.

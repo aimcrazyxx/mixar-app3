@@ -1,0 +1,165 @@
+name: Publish Mixar Windows Release
+
+on:
+  workflow_run:
+    workflows:
+      - ChatGPT Windows Build
+    types:
+      - completed
+    branches:
+      - release/v3.3.4
+  workflow_dispatch:
+  push:
+    branches:
+      - release/v3.3.4
+    paths:
+      - '.github/workflows/publish-windows-release.yml'
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: mixar-app3-v3.3.4-release-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: windows-2022
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ARTIFACT_NAME: mixar-3.3.4-windows-x64-prod
+      RELEASE_TAG: v3.3.4
+      RELEASE_ASSET: mixar-3.3.4-windows-x64-prod.zip
+      RELEASE_CHECKSUM: mixar-3.3.4-windows-x64-prod.sha256
+
+    steps:
+      - name: Download compiled artifact without rebuilding
+        id: artifact
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $artifactDir = Join-Path $PWD 'artifact'
+          $selectedRunId = $null
+          $selectedSha = $null
+
+          function Try-DownloadArtifact([string]$runId, [string]$headSha) {
+            if (Test-Path $artifactDir) {
+              Remove-Item $artifactDir -Recurse -Force
+            }
+            New-Item -ItemType Directory -Path $artifactDir | Out-Null
+
+            Write-Host "Trying build run $runId ($headSha)..."
+            gh run download $runId --repo $env:GITHUB_REPOSITORY --name $env:ARTIFACT_NAME --dir $artifactDir
+            if ($LASTEXITCODE -eq 0) {
+              return $true
+            }
+
+            Write-Warning "Artifact could not be downloaded from run $runId; trying an older successful run."
+            return $false
+          }
+
+          if ('${{ github.event_name }}' -eq 'workflow_run') {
+            $runId = '${{ github.event.workflow_run.id }}'
+            $headSha = '${{ github.event.workflow_run.head_sha }}'
+            if (-not (Try-DownloadArtifact $runId $headSha)) {
+              throw "The successful build run $runId has no downloadable $env:ARTIFACT_NAME artifact."
+            }
+            $selectedRunId = $runId
+            $selectedSha = $headSha
+          }
+          else {
+            $runsJson = gh run list `
+              --repo $env:GITHUB_REPOSITORY `
+              --workflow 'ChatGPT Windows Build' `
+              --branch 'release/v3.3.4' `
+              --status success `
+              --limit 20 `
+              --json databaseId,headSha,createdAt
+
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Failed to list successful Windows build runs.'
+            }
+
+            $runs = $runsJson | ConvertFrom-Json
+            foreach ($run in $runs) {
+              $runId = [string]$run.databaseId
+              $headSha = [string]$run.headSha
+              if (Try-DownloadArtifact $runId $headSha) {
+                $selectedRunId = $runId
+                $selectedSha = $headSha
+                break
+              }
+            }
+          }
+
+          if (-not $selectedRunId) {
+            throw "No successful build with a downloadable $env:ARTIFACT_NAME artifact was found."
+          }
+
+          $files = Get-ChildItem -Path $artifactDir -Recurse -File
+          if (-not $files) {
+            throw 'Downloaded artifact is empty.'
+          }
+
+          "run_id=$selectedRunId" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "head_sha=$selectedSha" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "Using existing build run: $selectedRunId"
+          Write-Host "Compiled commit         : $selectedSha"
+          Write-Host "Artifact files          : $($files.Count)"
+
+      - name: Package existing compiled artifact
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          if (Test-Path $env:RELEASE_ASSET) {
+            Remove-Item $env:RELEASE_ASSET -Force
+          }
+          if (Test-Path $env:RELEASE_CHECKSUM) {
+            Remove-Item $env:RELEASE_CHECKSUM -Force
+          }
+
+          Compress-Archive -Path 'artifact\*' -DestinationPath $env:RELEASE_ASSET -CompressionLevel Optimal
+          if (-not (Test-Path $env:RELEASE_ASSET)) {
+            throw "Release archive was not created: $env:RELEASE_ASSET"
+          }
+
+          $hash = (Get-FileHash -Algorithm SHA256 $env:RELEASE_ASSET).Hash.ToLowerInvariant()
+          "$hash  $env:RELEASE_ASSET" | Set-Content -Path $env:RELEASE_CHECKSUM -Encoding ascii
+
+          Write-Host "Release asset : $env:RELEASE_ASSET"
+          Write-Host "SHA-256       : $hash"
+
+      - name: Publish Mixar 3.3.4 to GitHub Releases
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $targetSha = '${{ steps.artifact.outputs.head_sha }}'
+
+          gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY *> $null
+          $releaseExists = ($LASTEXITCODE -eq 0)
+
+          if ($releaseExists) {
+            Write-Host "Release $env:RELEASE_TAG already exists; replacing Windows assets only."
+            gh release upload $env:RELEASE_TAG $env:RELEASE_ASSET $env:RELEASE_CHECKSUM --clobber --repo $env:GITHUB_REPOSITORY
+            if ($LASTEXITCODE -ne 0) {
+              throw "Failed to upload assets to existing release $env:RELEASE_TAG"
+            }
+          }
+          else {
+            Write-Host "Creating $env:RELEASE_TAG from already compiled commit $targetSha."
+            gh release create $env:RELEASE_TAG $env:RELEASE_ASSET $env:RELEASE_CHECKSUM `
+              --repo $env:GITHUB_REPOSITORY `
+              --target $targetSha `
+              --title 'Mixar 3.3.4' `
+              --notes 'Mixar 3.3.4 Windows x64 production build. Published from the existing successful GitHub Actions build artifact; no recompilation was performed by this release workflow.'
+            if ($LASTEXITCODE -ne 0) {
+              throw "Failed to create release $env:RELEASE_TAG"
+            }
+          }
+
+          Write-Host "Published from build run ${{ steps.artifact.outputs.run_id }}"
+          gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY
