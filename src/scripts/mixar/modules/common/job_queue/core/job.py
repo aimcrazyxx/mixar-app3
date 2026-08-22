@@ -4,10 +4,10 @@
 
 """Job dataclass + JobState enum for the job queue."""
 
-from dataclasses import dataclass, field
-from enum import Enum
 import time
 import uuid
+from dataclasses import dataclass, field
+from enum import Enum
 
 
 class JobState(str, Enum):

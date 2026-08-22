@@ -19,17 +19,22 @@ Users see friendly labels; the IDs are what get sent to the server.
 import json
 
 import bpy
-from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, StringProperty
-
+from bpy.props import (
+    BoolProperty,
+    EnumProperty,
+    FloatProperty,
+    IntProperty,
+    StringProperty,
+)
 from mixar.config.logging_config import get_logger
 
 from ...constants import (
     BYOK_API_KEY_MAX_LENGTH,
     CODEX_DEFAULT_MODEL,
     DIALOG_STATE_ITEMS,
-    OPENROUTER_DEFAULT_MODEL,
     OPENAI_COMPATIBLE_DEFAULT_BASE_URL,
     OPENAI_COMPATIBLE_DEFAULT_MODEL,
+    OPENROUTER_DEFAULT_MODEL,
 )
 from ...core import custom_model_cache
 from ...core.model_suggestions import get_model_items, get_provider_items
