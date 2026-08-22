@@ -973,6 +973,8 @@ def test_debug_report_keeps_non_secret_token_counts():
         (True, "openai-compatible", True),
         (True, "openai", False),
         (True, "openrouter", False),
+        (True, " openai-compatible", False),
+        (True, "OPENAI-COMPATIBLE", False),
         (False, "openai-compatible", False),
         (True, "", False),
     ],
