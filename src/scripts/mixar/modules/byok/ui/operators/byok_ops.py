@@ -16,7 +16,6 @@ import os
 
 import bpy
 from bpy.types import Operator
-
 from mixar.config.logging_config import get_logger
 
 from ...core import byok_client, model_suggestions
@@ -58,11 +57,18 @@ def _clear_cached_state(wm):
 
 def _wipe_form_secrets(wm):
     """Remove transient API/token material from the live WindowManager."""
-    for attr in ('byok_form_api_key', 'byok_form_codex_bundle'):
+    for attr in (
+        'byok_form_api_key', 'byok_form_codex_bundle',
+        'byok_custom_api_key', 'byok_custom_api_key_visible',
+    ):
         try:
             setattr(wm, attr, '')
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(
+                "Could not wipe transient BYOK field %s: %s",
+                attr,
+                type(exc).__name__,
+            )
 
 
 def _apply_cached_state(wm, data):
@@ -143,6 +149,9 @@ class MIXAR_BYOK_OT_open_dialog(Operator):
                 # Codex uses a free-text model slug, not the catalog dropdown.
                 if wm.byok_current_model:
                     wm.byok_form_codex_model = wm.byok_current_model
+            elif model_suggestions.is_openai_compatible(wm.byok_current_provider):
+                if wm.byok_current_model:
+                    wm.byok_custom_model = wm.byok_current_model
             elif wm.byok_current_model:
                 try:
                     wm.byok_form_model = wm.byok_current_model
@@ -280,12 +289,18 @@ class MIXAR_BYOK_OT_open_dialog(Operator):
         col.enabled = not disabled
         self._draw_tall_prop(col, wm, 'byok_form_provider', "Provider")
 
-        if model_suggestions.is_openrouter(wm.byok_form_provider):
+        if model_suggestions.is_openai_compatible(wm.byok_form_provider):
+            self._draw_openai_compatible_fields(box, col, wm)
+        elif model_suggestions.is_openrouter(wm.byok_form_provider):
             self._draw_openrouter_fields(box, col, wm)
         elif model_suggestions.is_codex(wm.byok_form_provider):
             self._draw_codex_fields(box, col, wm)
         else:
             self._draw_cloud_fields(box, col, wm)
+
+    def _draw_openai_compatible_fields(self, box, col, wm):
+        from ..components.openai_compatible_draw import draw
+        draw(box, col, wm, self._draw_tall_prop)
 
     def _draw_cloud_fields(self, box, col, wm):
         self._draw_tall_prop(col, wm, 'byok_form_model', "Model")
@@ -425,6 +440,12 @@ class MIXAR_BYOK_OT_save(Operator):
         wm = context.window_manager
         if wm.byok_dialog_state == 'SAVING':
             return False
+        if model_suggestions.is_openai_compatible(wm.byok_form_provider):
+            from mixar.modules.common.secure_storage import get_secret
+            key = wm.byok_custom_api_key_visible if wm.byok_custom_show_key else wm.byok_custom_api_key
+            return bool(wm.byok_custom_base_url.strip() and wm.byok_custom_model.strip()) and bool(
+                key.strip() or get_secret('openai_compatible_api_key') or wm.byok_custom_headers.strip()
+            )
         if model_suggestions.is_openrouter(wm.byok_form_provider):
             # OpenRouter needs a model slug + API key.
             return bool(wm.byok_form_openrouter_model.strip()) and bool(
@@ -447,6 +468,9 @@ class MIXAR_BYOK_OT_save(Operator):
         wm = context.window_manager
         provider = wm.byok_form_provider
 
+        if model_suggestions.is_openai_compatible(provider):
+            from .openai_compatible_ops import start_request
+            return start_request(wm, action='save')
         if model_suggestions.is_openrouter(provider):
             return self._execute_openrouter(wm)
         if model_suggestions.is_codex(provider):
@@ -526,6 +550,10 @@ def _on_save_done(success: bool, data, err):
     try:
         wm = bpy.context.window_manager
         if success:
+            from mixar.modules.common.secure_storage import delete_secret
+            wm.byok_custom_enabled = False
+            delete_secret('openai_compatible_api_key')
+            delete_secret('openai_compatible_config')
             _apply_cached_state(wm, data or {})
             _wipe_form_secrets(wm)
             wm.byok_dialog_state = 'IDLE'
@@ -559,7 +587,7 @@ class MIXAR_BYOK_OT_codex_load_file(Operator):
         try:
             with open(path, "r", encoding="utf-8") as f:
                 content = f.read().strip()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("Codex auth.json read failed: %s", e)
             self.report({'ERROR'}, "Could not read ~/.codex/auth.json")
             return {'CANCELLED'}
@@ -644,6 +672,20 @@ class MIXAR_BYOK_OT_confirm_remove(Operator):
 
     def execute(self, context):
         wm = context.window_manager
+        if model_suggestions.is_openai_compatible(wm.byok_current_provider):
+            from mixar.modules.common.secure_storage import delete_secret
+            delete_secret('openai_compatible_api_key')
+            delete_secret('openai_compatible_config')
+            wm.byok_custom_enabled = False
+            _clear_cached_state(wm)
+            _wipe_form_secrets(wm)
+            wm.byok_dialog_state = 'IDLE'
+            _redraw_mixie_chat_areas()
+            # A backend BYOK credential may still exist because the direct
+            # provider is intentionally a separate route.  Restore that
+            # authoritative server state after removing the local override.
+            byok_client.fetch_state(on_done=_on_fetch_done)
+            return {'FINISHED'}
         wm.byok_dialog_state = 'SAVING'
         wm.byok_last_error = ''
         _redraw_mixie_chat_areas()
@@ -695,6 +737,9 @@ def _on_fetch_done(success: bool, data, err):
     """
     try:
         wm = bpy.context.window_manager
+        from mixar.modules.byok.core.custom_agent_runtime import is_active
+        if is_active(wm):
+            return
         if success:
             _apply_cached_state(wm, data or {})
             logger.debug(

@@ -1,9 +1,14 @@
+# SPDX-FileCopyrightText: 2026 Adeveda Enterprises Private Limited
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 name: ChatGPT Windows Build
 
 on:
   push:
     branches:
       - release/v3.3.4
+      - codex/openai-compatible-tripo-p1
     paths-ignore:
       - '.github/workflows/**'
   workflow_dispatch:
@@ -23,6 +28,8 @@ jobs:
       MIXAR_ENV: Prod
       BUILD_CORES: 4
       ROBOCOPY_THREADS: 16
+      PREVIEW_RELEASE_ASSET: mixar-3.3.4-codex-preview-windows-x64.zip
+      PREVIEW_RELEASE_CHECKSUM: mixar-3.3.4-codex-preview-windows-x64.sha256
 
     steps:
       - name: Checkout Mixar source
@@ -128,11 +135,78 @@ jobs:
         shell: cmd
         run: call scripts\windows\build_ninja.bat
 
-      - name: Upload compiled Mixar 3.3.4 artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: mixar-3.3.4-windows-x64-prod
-          path: build/Prod/bin/
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 7
+      - name: Package Mixar 3.3.4 preview
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sourceDir = Join-Path $PWD 'build\Prod\bin'
+
+          if (-not (Test-Path $sourceDir -PathType Container)) {
+            throw "Compiled output directory was not found: $sourceDir"
+          }
+
+          $files = Get-ChildItem -Path $sourceDir -Recurse -File
+          if (-not $files) {
+            throw "Compiled output directory is empty: $sourceDir"
+          }
+
+          Remove-Item $env:PREVIEW_RELEASE_ASSET -Force -ErrorAction SilentlyContinue
+          Remove-Item $env:PREVIEW_RELEASE_CHECKSUM -Force -ErrorAction SilentlyContinue
+
+          Compress-Archive -Path "$sourceDir\*" -DestinationPath $env:PREVIEW_RELEASE_ASSET -CompressionLevel Optimal
+
+          $archive = Get-Item $env:PREVIEW_RELEASE_ASSET
+          $hash = (Get-FileHash -Algorithm SHA256 $archive.FullName).Hash.ToLowerInvariant()
+          "$hash  $env:PREVIEW_RELEASE_ASSET" | Set-Content -Path $env:PREVIEW_RELEASE_CHECKSUM -Encoding ascii
+
+          Write-Host "Compiled files : $($files.Count)"
+          Write-Host "Preview ZIP    : $($archive.FullName)"
+          Write-Host "Archive bytes  : $($archive.Length)"
+          Write-Host "SHA-256        : $hash"
+
+      - name: Upload Mixar 3.3.4 preview to GoFile
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = (Resolve-Path $env:PREVIEW_RELEASE_ASSET).Path
+
+          Write-Host "Uploading $archive to GoFile (São Paulo)..."
+
+          $response = & curl.exe `
+            --fail-with-body `
+            --silent `
+            --show-error `
+            --request POST `
+            'https://upload-sa-sao.gofile.io/uploadfile' `
+            --form "file=@$archive"
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "GoFile upload failed with curl exit code $LASTEXITCODE"
+          }
+
+          try {
+            $result = $response | ConvertFrom-Json
+          }
+          catch {
+            Write-Host $response
+            throw 'GoFile returned an invalid JSON response.'
+          }
+
+          if ($result.status -ne 'ok' -or -not $result.data.downloadPage) {
+            Write-Host $response
+            throw "GoFile upload failed with status: $($result.status)"
+          }
+
+          $downloadUrl = $result.data.downloadPage
+          Write-Host ''
+          Write-Host '============================================================'
+          Write-Host 'MIXAR 3.3.4 DOWNLOAD'
+          Write-Host $downloadUrl
+          Write-Host '============================================================'
+
+          "## Mixar 3.3.4 Codex Preview" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "**Download:** $downloadUrl" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "**File:** ``$env:PREVIEW_RELEASE_ASSET``" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "**SHA-256:** ``$((Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant())``" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append

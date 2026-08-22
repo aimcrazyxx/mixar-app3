@@ -23,10 +23,12 @@ Each record stores the message transcript as the same nested dicts
 produced by ``core.chat_serializer.snapshot_propgroup``, so restoring is
 a straight ``restore_propgroup`` into ``scene.mixie_chat_messages``.
 
-Reopening a chat also restores ``scene.mixie_session_id``: the backend
-keeps the conversation state server-side in a LangGraph checkpoint keyed
-by that id, so the next message resumes the agent's context — nothing
-from the transcript is ever uploaded.
+Reopening a backend chat also restores ``scene.mixie_session_id``: the
+backend keeps the conversation state server-side in a LangGraph checkpoint
+keyed by that id, so the next message resumes the agent's context — nothing
+from the transcript is ever uploaded. Direct-provider records restore only
+the transcript and start a fresh network session because their in-memory
+model history is not a backend checkpoint.
 
 Threading: everything here runs on the main thread (operators and the
 SSE-completion timer). Disk writes are a few hundred KB of JSON at turn
@@ -38,6 +40,7 @@ import os
 import re
 import shutil
 import uuid
+from contextlib import suppress
 from datetime import datetime, timezone
 
 from mixar.config.logging_config import get_logger
@@ -53,7 +56,7 @@ from .chat_serializer import restore_propgroup, snapshot_propgroup
 logger = get_logger(__name__)
 
 _INDEX_FILENAME = "index.json"
-_RECORD_VERSION = 1
+_RECORD_VERSION = 2
 _STOPPED_MARKER = "*Stopped*"
 
 # Metadata keys mirrored into index.json for the popover list.
@@ -66,6 +69,7 @@ _META_KEYS = (
     "created_at",
     "archived_at",
     "message_count",
+    "agent_route",
 )
 
 # Cached, newest-first metadata list for the popover. The panel's draw()
@@ -132,10 +136,8 @@ def _atomic_write_json(path: str, data) -> None:
         # A failed write (disk full, encoding error) must not strand the
         # uniquely-named tmp file — archive runs every turn end, so leaks
         # would accumulate one orphan per turn.
-        try:
+        with suppress(OSError):
             os.remove(tmp)
-        except OSError:
-            pass
         raise
 
 
@@ -260,6 +262,13 @@ def archive_current(scene) -> bool:
     now = _now_iso()
     index = _load_index()
     previous_meta = index.get(session_id) or {}
+    agent_route = "backend"
+    try:
+        from mixar.modules.byok.core.custom_agent_runtime import is_custom_session
+        if is_custom_session(session_id):
+            agent_route = "direct_custom"
+    except Exception as e:
+        logger.debug(f"Could not determine archived agent route: {e}")
     record = {
         "version": _RECORD_VERSION,
         "session_id": session_id,
@@ -270,6 +279,7 @@ def archive_current(scene) -> bool:
         "created_at": previous_meta.get("created_at") or now,
         "archived_at": now,
         "message_count": len(snapshot),
+        "agent_route": agent_route,
         "messages": snapshot,
     }
     try:
@@ -291,9 +301,10 @@ def archive_current(scene) -> bool:
 def restore_into_scene(scene, record: dict) -> int:
     """Replace the scene's live chat with an archived record.
 
-    Also restores ``scene.mixie_session_id`` so the next message resumes
-    the backend thread. Caller is responsible for tearing down any
-    running stream first (mirrors New Chat's cleanup).
+    Restores ``scene.mixie_session_id`` only for a backend conversation so
+    the next message can resume its checkpoint. A direct-provider transcript
+    starts a fresh route-owned session instead. Caller is responsible for
+    tearing down any running stream first (mirrors New Chat's cleanup).
     """
     coll = scene.mixie_chat_messages
     coll.clear()
@@ -301,7 +312,10 @@ def restore_into_scene(scene, record: dict) -> int:
         if isinstance(msg_data, dict):
             restore_propgroup(coll.add(), msg_data)
 
-    scene.mixie_session_id = record.get("session_id", "") or ""
+    if record.get("agent_route", "backend") == "direct_custom":
+        scene.mixie_session_id = ""
+    else:
+        scene.mixie_session_id = record.get("session_id", "") or ""
     if hasattr(scene, "mixie_chat_user_has_engaged"):
         # Restored chats have content — never overlay the empty-state greeting.
         scene.mixie_chat_user_has_engaged = True
@@ -311,7 +325,7 @@ def restore_into_scene(scene, record: dict) -> int:
     try:
         from .markdown_parser import clear_incremental_cache
         clear_incremental_cache()
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.debug(f"clear_incremental_cache on restore skipped: {e}")
 
     return len(coll)

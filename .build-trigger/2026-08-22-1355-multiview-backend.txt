@@ -1,0 +1,1 @@
+Trigger ChatGPT Windows Build after routing Tripo Low Multi View through the same Mixar backend as Single.

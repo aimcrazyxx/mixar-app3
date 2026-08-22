@@ -19,19 +19,19 @@ lifecycle lives in ``queue_download.DownloadMixin``.
 """
 
 import time
+from contextlib import suppress
 from typing import NamedTuple
 
 import bpy
-
 from mixar.config.logging_config import get_logger
 from mixar.modules.common.api.exceptions import (
     AuthenticationError,
-    ConnectionError as APIConnectionError,
-    TimeoutError as APITimeoutError,
 )
-from .model_io import (
-    get_poll_interval,
-    redraw_3d_views,
+from mixar.modules.common.api.exceptions import (
+    ConnectionError as APIConnectionError,
+)
+from mixar.modules.common.api.exceptions import (
+    TimeoutError as APITimeoutError,
 )
 
 from ..constants import (
@@ -41,7 +41,11 @@ from ..constants import (
     MAX_POLL_DURATION,
 )
 from .error_helpers import classify_error
-from .job import FAILED_BACKEND_STATUSES, Job, JobState, RUNNING_STATES, TERMINAL_STATES
+from .job import FAILED_BACKEND_STATUSES, RUNNING_STATES, TERMINAL_STATES, Job, JobState
+from .model_io import (
+    get_poll_interval,
+    redraw_3d_views,
+)
 from .queue_download import DownloadMixin
 
 logger = get_logger(__name__)
@@ -177,10 +181,13 @@ def handle_backend_job_update(payload: dict) -> bool:
     status = _JOBQ_STATE_TO_STATUS.get(state, "")
     if status:
         job.backend_status = status
-        if status in {"SUBMITTED", "POLLING"}:
-            if hasattr(job, "_processing_started") and not job._processing_started:
-                job._processing_started = True
-                job.poll_start_time = time.time()
+        if (
+            status in {"SUBMITTED", "POLLING"}
+            and hasattr(job, "_processing_started")
+            and not job._processing_started
+        ):
+            job._processing_started = True
+            job.poll_start_time = time.time()
     if payload.get("error"):
         job.error = str(payload.get("error"))
     queue._notify()
@@ -323,9 +330,7 @@ def _ensure_sync_watchdog() -> None:
                     job.state == JobState.RUNNING_POLL
                     and job.poll_start_time > 0
                     and now - job.poll_start_time > MAX_POLL_DURATION
-                ):
-                    queue._fail_timed_out(job)
-                elif (
+                ) or (
                     job.state == JobState.RUNNING_DOWNLOAD
                     and job.download_started_at > 0
                     and now_mono - job.download_started_at
@@ -446,10 +451,8 @@ class FeatureQueue(DownloadMixin):
             self._listeners.append(fn)
 
     def remove_listener(self, fn) -> None:
-        try:
+        with suppress(ValueError):
             self._listeners.remove(fn)
-        except ValueError:
-            pass
 
     def running_count(self) -> int:
         return sum(1 for j in self._jobs if j.state in RUNNING_STATES)
@@ -684,7 +687,7 @@ class FeatureQueue(DownloadMixin):
         if job.should_skip_poll():
             job.state = JobState.RUNNING_DOWNLOAD
             self._notify()
-            self._begin_download(job, [])
+            self._begin_download(job, job.inline_result_files())
             return
 
         job.state = JobState.RUNNING_POLL
@@ -713,9 +716,10 @@ class FeatureQueue(DownloadMixin):
         if isinstance(error, AuthenticationError):
             self._enter_auth_pause(job, error)
             return
-        if isinstance(error, (APITimeoutError, APIConnectionError)):
-            if self._retry_submit_later(job, error):
-                return
+        if isinstance(error, (APITimeoutError, APIConnectionError)) and self._retry_submit_later(
+            job, error
+        ):
+            return
         job.state = JobState.FAILED
         job.error = str(error)
         job.user_message = classify_error(error) or "Submission failed"
