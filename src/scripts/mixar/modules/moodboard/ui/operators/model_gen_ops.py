@@ -64,7 +64,6 @@ def _routing(service_key):
             scene_flag="mixie_hunyuan_rapid_is_generating",
         )
 
-    # Unknown service — generic routing keyed by the catalog service.
     feature_key = service_key
     try:
         from mixar.bootstrap.generation_catalog_cache import get_service
@@ -103,33 +102,7 @@ class MIXIE_OT_model_gen_generate(Operator):
         return getattr(tab, 'reference_image', None)
 
     def _turnaround_payload(self, context, image, service_key, model):
-        """Multi-view payload fragment for the set *image* is the main of.
-
-        The ONLY multi-view source for this tab: the Multiple Views section
-        holds both backend-detected turnaround crops and views the user added
-        by hand, so there is nothing else to merge in.
-        ``scene.hunyuan.pro.multi_views`` is deliberately not consulted — it
-        belongs to the standalone Hunyuan panel, and reading it here used to
-        silently discard whatever the user put in it.
-
-        The set is resolved FROM *image* (the vendor's single frontal image,
-        never a group member), not from the tab, so an Input Image that does
-        not own a set takes the plain single-image path even while a set is
-        active on the tab. Reading it off the tab is the production defect:
-        a set detected for one subject was inherited by an unrelated image
-        picked later and generated as a morph of the two.
-
-        Shares ``build_active_group_payload`` with the agent/legacy operator
-        so the binding, the capability check and the terminal error wording
-        all come from one place. Deliberately NOT pre-gated on
-        ``model_supports_multi_view``: an incapable model on a bound main has
-        to cancel loudly, and an early-out would silently drop the set — the
-        exact "degrade to one image" this guard exists to prevent.
-
-        Returns ``None`` when *image* owns no multi-view set (the normal
-        single-image path applies unchanged), ``False`` when the set is
-        unusable and the operator should cancel, else the fragment.
-        """
+        """Multi-view payload fragment for the set *image* is the main of."""
         from mixar.modules.moodboard.core.turnaround_views import (
             build_active_group_payload,
         )
@@ -168,7 +141,6 @@ class MIXIE_OT_model_gen_generate(Operator):
             self.report({"WARNING"}, "Model Gen tab not available")
             return {"CANCELLED"}
 
-        # --- Resolve mode (service) and model slug from the catalog ---
         service_key = resolve_service_key("model_gen", getattr(tab, "mode", ""))
         if not service_key:
             self.report({"WARNING"}, "Please wait for the catalog to load")
@@ -191,27 +163,21 @@ class MIXIE_OT_model_gen_generate(Operator):
             model.lower() == "tripo-low"
             and getattr(tab, 'tripo_input_mode', 'SINGLE') == 'MULTI'
         ):
-            return self._execute_tripo_p1(context, tab, model)
+            return self._execute_tripo_multi_backend(
+                context, tab, model, service_key
+            )
 
-        # --- Inputs (image shared by all modes; multi-view for models that
-        # advertise supports_multi_view, keyed per-model not per-service) ---
         image = self._get_input_image(context, tab)
         prompt = (getattr(tab, 'prompt', '') or '').strip() or None
         supports_mv = model_supports_multi_view(service_key, model)
 
-        # --- Multiple Views: submit the whole set as ONE multi-view job ---
-        # Detected crops were already staged in S3 by detect-views, so their
-        # keys are forwarded verbatim; hand-added views carry inline pixels.
-        # Applies only when THIS image is the set's own frontal image; the
-        # capability check lives inside, not in the supports_mv pre-gate.
         turnaround_payload = self._turnaround_payload(
             context, image, service_key, model)
         if turnaround_payload is False:
             return {"CANCELLED"}
 
-        # Per-mode input validation (mirrors each legacy operator).
         if turnaround_payload:
-            pass  # the input image plus its companion views are the input
+            pass
         elif service_key == "image_to_3d" or supports_mv:
             if not (image or prompt):
                 self.report(
@@ -228,7 +194,6 @@ class MIXIE_OT_model_gen_generate(Operator):
                 self.report({"WARNING"}, "Please add an input image")
                 return {"CANCELLED"}
 
-        # --- Base payload (image / multi-view) ---
         payload = {}
         if turnaround_payload:
             payload.update(turnaround_payload)
@@ -245,25 +210,23 @@ class MIXIE_OT_model_gen_generate(Operator):
                 payload["image_bytes_b64"] = _b64.b64encode(image_bytes).decode()
                 payload["image_filename"] = "image.png"
 
-        # --- Catalog params -> wire payload (per-service assembler) ---
         params = {}
         try:
             params = collect_params(service_key, model)
         except Exception as e:
-            logger.debug("collect_params failed for %s/%s: %s",
-                         service_key, model, e)
+            logger.debug(
+                "collect_params failed for %s/%s: %s", service_key, model, e
+            )
         if prompt:
             if service_key == "image_to_3d":
                 params["prompt"] = prompt
             elif service_key == "hunyuan_rapid":
-                # Rapid: prompt and image are mutually exclusive on the wire.
                 if image is None:
                     params["prompt"] = prompt
             else:
                 payload["prompt"] = prompt
         payload = assemble_payload(service_key, params, payload, model)
 
-        # --- Enqueue ---
         route = _routing(service_key)
         feature_key = route.pop("feature_key")
         label = image.name if image else ((prompt or model)[:40])
@@ -294,96 +257,107 @@ class MIXIE_OT_model_gen_generate(Operator):
         self.report({"INFO"}, "Added to queue")
         return {"FINISHED"}
 
-    def _execute_tripo_p1(self, context, tab, model):
-        from mixar.modules.common.job_queue import (
-            create_scene_flag_listener,
-            get_queue_with_listener,
-        )
-        from mixar.modules.common.job_queue.constants import FEATURE_MODEL_3D
-        from mixar.modules.common.secure_storage import get_secret
-        from mixar.modules.common.utils.image_utils import compress_image_for_upload
-        from mixar.modules.moodboard.core.tripo_p1_job import TripoP1MultiViewJob
+    def _execute_tripo_multi_backend(self, context, tab, model, service_key):
+        """Submit Tripo Multi View through the same Mixar backend as Single.
 
-        key = get_secret('tripo_api_key')
-        if not key:
-            self.report({"ERROR"}, "Save your Tripo API key before using P1 Multi-View")
-            return {"CANCELLED"}
+        The front image uses the normal top-level image contract and the other
+        views use the existing generic ``multi_view_images`` contract. This
+        deliberately does not read or store a Tripo API key: authentication,
+        credits, provider routing, polling, download and import are all handled
+        by the ordinary Mixar ``model_3d`` job queue path.
+        """
+        from mixar.modules.common.generation_params import (
+            assemble_payload,
+            collect_params,
+        )
+        from mixar.modules.common.utils.image_utils import compress_for_service
+
         images = {
-            'front': getattr(tab, 'tripo_front_image', None),
-            'left': getattr(tab, 'tripo_left_image', None),
-            'back': getattr(tab, 'tripo_back_image', None),
-            'right': getattr(tab, 'tripo_right_image', None),
+            "front": getattr(tab, "tripo_front_image", None),
+            "left": getattr(tab, "tripo_left_image", None),
+            "back": getattr(tab, "tripo_back_image", None),
+            "right": getattr(tab, "tripo_right_image", None),
         }
-        if images['front'] is None or sum(value is not None for value in images.values()) < 2:
-            self.report({"ERROR"}, "Tripo P1 requires Front plus at least one other view")
+        present = {name: image for name, image in images.items() if image is not None}
+        if images["front"] is None or len(present) < 2:
+            self.report(
+                {"ERROR"},
+                "Multi View requires Front plus at least one other view",
+            )
             return {"CANCELLED"}
-        face_limit = int(getattr(tab, 'tripo_face_limit', 0))
-        if face_limit and face_limit < 50:
-            self.report({"ERROR"}, "Face Limit must be 0 or between 50 and 20,000")
-            return {"CANCELLED"}
+
+        encoded = {}
         try:
-            image_bytes = {
-                view: compress_image_for_upload(image)
-                for view, image in images.items() if image is not None
-            }
+            for view, image in present.items():
+                data = compress_for_service(image, "image_to_3d")
+                if not data:
+                    raise ValueError(f"'{image.name}' has no pixel data")
+                encoded[view] = _b64.b64encode(data).decode()
         except Exception as exc:
-            self.report({"ERROR"}, f"Failed to process Tripo view: {exc}")
+            self.report({"ERROR"}, f"Failed to process Multi View image: {exc}")
             return {"CANCELLED"}
 
-        job = TripoP1MultiViewJob(
-            feature_key=FEATURE_MODEL_3D,
-            label=f"{images['front'].name} (P1 Multi-View)",
-            model=model,
-            images=image_bytes,
-            api_key=key,
-            texture=bool(tab.tripo_texture),
-            pbr=bool(tab.tripo_pbr and tab.tripo_texture),
-            face_limit=face_limit,
-            model_seed=int(tab.tripo_model_seed),
-            texture_alignment=str(tab.tripo_texture_alignment),
-            orientation=str(tab.tripo_orientation),
-        )
-        listener = create_scene_flag_listener(
-            "mixie_image_to_3d_is_generating",
-            batch_popup_title="Image to 3D batch complete",
-        )
-        queue = get_queue_with_listener(FEATURE_MODEL_3D, listener)
-        if not queue.submit(job):
-            self.report({"WARNING"}, "A duplicate generation is already queued")
+        payload = {
+            "image_bytes_b64": encoded["front"],
+            "image_filename": "front.png",
+            "multi_view_images": [
+                {
+                    "image_bytes_b64": encoded[view],
+                    "filename": f"{view}.png",
+                    "view_type": view,
+                }
+                for view in ("left", "back", "right")
+                if view in encoded
+            ],
+        }
+
+        prompt = (getattr(tab, "prompt", "") or "").strip() or None
+        params = {}
+        try:
+            params = collect_params(service_key, model)
+        except Exception as exc:
+            logger.debug(
+                "collect_params failed for %s/%s: %s",
+                service_key,
+                model,
+                exc,
+            )
+        if prompt:
+            payload["prompt"] = prompt
+        payload = assemble_payload(service_key, params, payload, model)
+
+        route = _routing(service_key)
+        feature_key = route.pop("feature_key")
+        label = f"{images['front'].name} (Multi View)"
+
+        try:
+            from mixar.modules.common.job_queue import enqueue_generation
+
+            job = enqueue_generation(
+                kind="glb",
+                feature_key=feature_key,
+                job_type=service_key,
+                model=model,
+                payload=payload,
+                label=label,
+                **route,
+            )
+            if not job:
+                self.report({"WARNING"}, "A duplicate generation is already queued")
+                return {"CANCELLED"}
+        except Exception as exc:
+            self.report({"ERROR"}, f"Failed to start Multi View generation: {exc}")
             return {"CANCELLED"}
+
         from mixar.modules.common.job_queue.ui.lists.queue_uilist import mark_enqueued
-        mark_enqueued(FEATURE_MODEL_3D)
-        self.report({"INFO"}, "Tripo P1 Multi-View added to queue")
+
+        mark_enqueued(feature_key)
+        self.report({"INFO"}, "Multi View added to Mixar queue")
         return {"FINISHED"}
-
-
-class MIXIE_OT_tripo_p1_save_key(Operator):
-    """Store the Tripo key outside the .blend file."""
-
-    bl_idname = "mixie.tripo_p1_save_key"
-    bl_label = "Save Tripo API Key"
-    bl_options = {'INTERNAL'}
-
-    def execute(self, context):
-        from mixar.modules.common.secure_storage import masked_preview, set_secret
-
-        tab = context.scene.mixie_moodboard_sidebar.tab_image_to_3d
-        key = tab.tripo_api_key.strip()
-        if not key:
-            self.report({'ERROR'}, "Enter a Tripo API key")
-            return {'CANCELLED'}
-        if not set_secret('tripo_api_key', key):
-            self.report({'ERROR'}, "Could not store the key in the operating-system credential vault")
-            return {'CANCELLED'}
-        tab.tripo_key_preview = masked_preview(key)
-        tab.tripo_api_key = ''
-        self.report({'INFO'}, "Tripo API key stored securely")
-        return {'FINISHED'}
 
 
 classes = (
     MIXIE_OT_model_gen_generate,
-    MIXIE_OT_tripo_p1_save_key,
 )
 
 
