@@ -8,7 +8,8 @@ on:
   push:
     branches:
       - release/v3.3.4
-      - codex/openai-compatible-tripo-p1
+    paths-ignore:
+      - '.github/workflows/**'
   workflow_dispatch:
 
 permissions:
