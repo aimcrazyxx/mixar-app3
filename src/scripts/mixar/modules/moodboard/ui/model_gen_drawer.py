@@ -22,13 +22,6 @@ from .sidebar_ui_helpers import (
     draw_section_separator,
 )
 
-# Per-mode generate-footer routing:
-#   service key -> (feature_key, scene flag, operator).
-# Feature keys reuse the existing FeatureQueue constants
-# (job_queue/constants.py) so each mode lands in its established queue.
-# All the image-to-3D modes share mixie.model_gen_generate; smart segmentation
-# is a different pipeline (it segments as well as models) with its own enqueue
-# helper and import hook, so it carries its own operator.
 _MODEL_GEN_GENERATE = "mixie.model_gen_generate"
 _MODEL_GEN_FOOTER = {
     "model_3d": ("model_3d", "mixie_image_to_3d_is_generating",
@@ -69,7 +62,6 @@ def _draw_model_gen(layout, context):
     model_slug = getattr(tab, "model", "")
     is_tripo_low = model_slug.lower() == "tripo-low"
 
-    # --- Prompt ---
     draw_prompt_section(layout, tab, label="Prompt (optional)")
     draw_section_separator(layout)
 
@@ -79,7 +71,7 @@ def _draw_model_gen(layout, context):
 
     is_tripo_multi = is_tripo_low and tab.tripo_input_mode == 'MULTI'
     if is_tripo_multi:
-        col = draw_section_box(layout, "P1 Multi-View Images", icon='RENDERLAYERS')
+        col = draw_section_box(layout, "Multi View Images", icon='RENDERLAYERS')
         grid = col.grid_flow(row_major=True, columns=2, even_columns=True)
         for prop, label in (
             ('tripo_front_image', "Front (required)"),
@@ -93,9 +85,12 @@ def _draw_model_gen(layout, context):
             if image is not None:
                 draw_image_thumbnail(cell, image, scale=2.2)
             cell.template_ID(tab, prop, open="image.open")
-        col.label(text="Front plus at least one other view is required.", icon='INFO')
+        col.label(
+            text="Front plus at least one other view is required.",
+            icon='INFO',
+        )
+        col.label(text="Uses the same Mixar backend as Single.", icon='CHECKMARK')
     else:
-        # Existing Single UI and behavior remain unchanged.
         col = draw_section_box(
             layout,
             "Input Image",
@@ -109,8 +104,6 @@ def _draw_model_gen(layout, context):
                 remove_op="mixie.image_to_3d_remove_image",
             )
 
-    # --- Multiple Views: detected turnaround crops AND hand-added views,
-    # one section, one data model (multi-view-capable models only) ---
     from .turnaround_drawer import draw_detect_views_section
     draw_section_separator(layout)
     if not is_tripo_multi:
@@ -118,7 +111,8 @@ def _draw_model_gen(layout, context):
 
     draw_section_separator(layout)
 
-    # --- Settings (Mode / Model / schema params from the catalog) ---
+    # Single and Multi View intentionally share the same catalog-backed model
+    # parameters (Texture, Face Limit, etc.). No Tripo BYOK/API-key controls.
     col = draw_section_box(layout, "Settings", icon='SETTINGS')
     col.use_property_split = True
     col.use_property_decorate = False
@@ -126,23 +120,7 @@ def _draw_model_gen(layout, context):
         col, tab, "model_gen",
         model_refresh_op="mixie.image_to_3d_refresh_models",
     )
-    if is_tripo_multi:
-        col.separator()
-        col.prop(tab, 'tripo_texture')
-        pbr = col.row(); pbr.enabled = tab.tripo_texture
-        pbr.prop(tab, 'tripo_pbr')
-        textured = col.column(align=True); textured.enabled = tab.tripo_texture
-        textured.prop(tab, 'tripo_texture_alignment')
-        textured.prop(tab, 'tripo_orientation')
-        col.prop(tab, 'tripo_face_limit')
-        col.prop(tab, 'tripo_model_seed')
-        key = col.row(align=True)
-        key.prop(tab, 'tripo_api_key', text="Tripo API Key")
-        key.operator("mixie.tripo_p1_save_key", text="Save", icon='LOCKED')
-        if tab.tripo_key_preview:
-            col.label(text=f"Stored: {tab.tripo_key_preview}", icon='CHECKMARK')
 
-    # --- Generate (routed per mode) ---
     feature_key, gen_flag, generate_op = _MODEL_GEN_FOOTER.get(
         service_key, _MODEL_GEN_FOOTER["model_3d"])
     draw_generate_footer(
