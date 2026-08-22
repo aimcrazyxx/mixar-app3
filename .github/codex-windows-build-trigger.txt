@@ -1,1 +1,0 @@
-One-shot Windows preview build trigger after fixing first-release publication.
