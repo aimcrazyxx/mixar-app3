@@ -173,8 +173,15 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
 
-          gh release view $env:PREVIEW_RELEASE_TAG --repo $env:GITHUB_REPOSITORY *> $null
-          $releaseExists = ($LASTEXITCODE -eq 0)
+          # An absent preview is normal on the first run. Listing releases
+          # avoids turning "release not found" into a fatal PowerShell error.
+          $releasesJson = gh release list --repo $env:GITHUB_REPOSITORY --limit 100 --json tagName
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to list releases for $env:GITHUB_REPOSITORY"
+          }
+
+          $releaseTags = @($releasesJson | ConvertFrom-Json | ForEach-Object { $_.tagName })
+          $releaseExists = $releaseTags -contains $env:PREVIEW_RELEASE_TAG
 
           if ($releaseExists) {
             Write-Host "Prerelease $env:PREVIEW_RELEASE_TAG already exists; replacing preview assets only."
