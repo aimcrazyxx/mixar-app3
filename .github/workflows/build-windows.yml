@@ -138,5 +138,7 @@ jobs:
           name: mixar-3.3.4-windows-x64-prod
           path: build/Prod/bin/
           if-no-files-found: error
-          compression-level: 0
-          retention-days: 7
+          # Compress the installed tree before it counts against Actions storage.
+          compression-level: 9
+          # This is a validation build; keep it only long enough to download.
+          retention-days: 1
