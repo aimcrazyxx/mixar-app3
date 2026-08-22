@@ -13,7 +13,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: mixar-app3-release-v3.3.4-windows
@@ -27,6 +27,10 @@ jobs:
       MIXAR_ENV: Prod
       BUILD_CORES: 4
       ROBOCOPY_THREADS: 16
+      GH_TOKEN: ${{ github.token }}
+      PREVIEW_RELEASE_TAG: v3.3.4-codex-preview
+      PREVIEW_RELEASE_ASSET: mixar-3.3.4-codex-preview-windows-x64.zip
+      PREVIEW_RELEASE_CHECKSUM: mixar-3.3.4-codex-preview-windows-x64.sha256
 
     steps:
       - name: Checkout Mixar source
@@ -132,13 +136,61 @@ jobs:
         shell: cmd
         run: call scripts\windows\build_ninja.bat
 
-      - name: Upload compiled Mixar 3.3.4 artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: mixar-3.3.4-windows-x64-prod
-          path: build/Prod/bin/
-          if-no-files-found: error
-          # Compress the installed tree before it counts against Actions storage.
-          compression-level: 9
-          # This is a validation build; keep it only long enough to download.
-          retention-days: 1
+      - name: Package Mixar 3.3.4 preview
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sourceDir = Join-Path $PWD 'build\Prod\bin'
+
+          if (-not (Test-Path $sourceDir -PathType Container)) {
+            throw "Compiled output directory was not found: $sourceDir"
+          }
+
+          $files = Get-ChildItem -Path $sourceDir -Recurse -File
+          if (-not $files) {
+            throw "Compiled output directory is empty: $sourceDir"
+          }
+
+          Remove-Item $env:PREVIEW_RELEASE_ASSET -Force -ErrorAction SilentlyContinue
+          Remove-Item $env:PREVIEW_RELEASE_CHECKSUM -Force -ErrorAction SilentlyContinue
+
+          Compress-Archive -Path "$sourceDir\*" -DestinationPath $env:PREVIEW_RELEASE_ASSET -CompressionLevel Optimal
+          $archive = Get-Item $env:PREVIEW_RELEASE_ASSET
+          if ($archive.Length -ge 2GB) {
+            throw "Preview archive is too large for a GitHub release asset: $($archive.Length) bytes"
+          }
+
+          $hash = (Get-FileHash -Algorithm SHA256 $archive.FullName).Hash.ToLowerInvariant()
+          "$hash  $env:PREVIEW_RELEASE_ASSET" | Set-Content -Path $env:PREVIEW_RELEASE_CHECKSUM -Encoding ascii
+
+          Write-Host "Compiled files : $($files.Count)"
+          Write-Host "Release asset  : $($archive.FullName)"
+          Write-Host "Archive bytes  : $($archive.Length)"
+          Write-Host "SHA-256        : $hash"
+
+      - name: Publish Mixar 3.3.4 Codex preview
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          gh release view $env:PREVIEW_RELEASE_TAG --repo $env:GITHUB_REPOSITORY *> $null
+          $releaseExists = ($LASTEXITCODE -eq 0)
+
+          if ($releaseExists) {
+            Write-Host "Prerelease $env:PREVIEW_RELEASE_TAG already exists; replacing preview assets only."
+            gh release upload $env:PREVIEW_RELEASE_TAG $env:PREVIEW_RELEASE_ASSET $env:PREVIEW_RELEASE_CHECKSUM --clobber --repo $env:GITHUB_REPOSITORY
+          }
+          else {
+            gh release create $env:PREVIEW_RELEASE_TAG $env:PREVIEW_RELEASE_ASSET $env:PREVIEW_RELEASE_CHECKSUM `
+              --repo $env:GITHUB_REPOSITORY `
+              --target $env:GITHUB_SHA `
+              --title 'Mixar 3.3.4 Codex Preview' `
+              --notes "Windows x64 production preview compiled from commit $env:GITHUB_SHA. Includes the backend-compatible provider routing, Tripo P1 updates, and current fixes from codex/openai-compatible-tripo-p1." `
+              --prerelease
+          }
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to publish prerelease $env:PREVIEW_RELEASE_TAG"
+          }
+
+          gh release view $env:PREVIEW_RELEASE_TAG --repo $env:GITHUB_REPOSITORY
