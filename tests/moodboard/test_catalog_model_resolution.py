@@ -84,6 +84,68 @@ def test_catalog_default_model_survives_cache_import_failure():
 
 
 # ---------------------------------------------------------------------------
+# Multi-view capability — catalog flag plus implemented Tripo contracts
+# ---------------------------------------------------------------------------
+
+def _catalog_model(slug, **fields):
+    return {"slug": slug, **fields}
+
+
+@pytest.mark.parametrize("slug", [
+    "tripo-v31",
+    "tripo-v3.1",
+    "tripo-p1",
+    "P1-20260311",
+])
+def test_current_tripo_models_support_multiview_with_a_stale_catalog(slug):
+    from mixar.modules.common.generation_params import model_supports_multi_view
+
+    row = _catalog_model(slug, supports_multi_view=False)
+    with patch(
+        "mixar.bootstrap.generation_catalog_cache.get_model",
+        return_value=row,
+    ):
+        assert model_supports_multi_view("model_3d", slug) is True
+
+
+def test_tripo_provider_model_id_can_supply_the_multiview_capability():
+    from mixar.modules.common.generation_params import model_supports_multi_view
+
+    row = _catalog_model(
+        "tripo-current",
+        supports_multi_view=False,
+        provider_model_id="v3.1-20260211",
+    )
+    with patch(
+        "mixar.bootstrap.generation_catalog_cache.get_model",
+        return_value=row,
+    ):
+        assert model_supports_multi_view("model_3d", "tripo-current") is True
+
+
+def test_unknown_legacy_tripo_model_still_fails_closed():
+    from mixar.modules.common.generation_params import model_supports_multi_view
+
+    row = _catalog_model("tripo-low", supports_multi_view=False)
+    with patch(
+        "mixar.bootstrap.generation_catalog_cache.get_model",
+        return_value=row,
+    ):
+        assert model_supports_multi_view("model_3d", "tripo-low") is False
+
+
+def test_private_catalog_multiview_flag_is_accepted_during_migration():
+    from mixar.modules.common.generation_params import model_supports_multi_view
+
+    row = _catalog_model("future-model", _supports_multi_view=True)
+    with patch(
+        "mixar.bootstrap.generation_catalog_cache.get_model",
+        return_value=row,
+    ):
+        assert model_supports_multi_view("model_3d", "future-model") is True
+
+
+# ---------------------------------------------------------------------------
 # Scene Gen — was SCENE_GEN_MODEL = "scene_gen_v1"
 # ---------------------------------------------------------------------------
 

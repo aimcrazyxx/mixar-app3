@@ -164,7 +164,10 @@ def catalog_default_model(service_key: str) -> Optional[str]:
 def model_supports_multi_view(service_key: str, model_slug: str) -> bool:
     """True when the selected catalog model accepts multi-view images.
 
-    Reads the per-model ``supports_multi_view`` flag from the catalog.
+    Reads the per-model ``supports_multi_view`` flag from the catalog, with a
+    narrow local override for Tripo versions whose official multi-view request
+    is implemented by this client.  That override keeps stale Tripo 3.1/P1
+    catalog rows usable, while unknown Tripo versions still fail closed.
     Keyed on the model (not the service key) so the multi-view uploader
     follows the Hunyuan Pro models across service merges — historically it
     was gated on the ``image_to_3d`` service key, which vanished when
@@ -175,7 +178,17 @@ def model_supports_multi_view(service_key: str, model_slug: str) -> bool:
 
         slug = resolve_model_slug(service_key, model_slug)
         model = get_model(service_key, slug)
-        return bool((model or {}).get("supports_multi_view"))
+        if bool(
+            (model or {}).get("supports_multi_view")
+            or (model or {}).get("_supports_multi_view")
+        ):
+            return True
+
+        from mixar.modules.moodboard.core.tripo_catalog import (
+            tripo_supports_multi_view,
+        )
+
+        return tripo_supports_multi_view(service_key, slug)
     except Exception:
         return False
 

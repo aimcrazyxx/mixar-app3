@@ -244,11 +244,9 @@ def _draw_image_to_3d_basic(layout, context):
         )
 
     # --- Turnaround sheet -> per-view crops (multi-view models only) ---
-    # Offline fallback path. There is no longer a hardcoded slug list behind
-    # this: model_accepts_multi_view() reads the catalog's supports_multi_view
-    # flag and returns False when the catalog has not loaded, so this section
-    # simply renders nothing offline — which is correct, since the job could
-    # not be submitted then either.
+    # Offline fallback path. model_accepts_multi_view() normally reads the
+    # catalog flag and has a narrow override for the Tripo 3.1/P1 contracts
+    # implemented by this client. Unknown model versions remain hidden.
     from .turnaround_drawer import draw_detect_views_section
     draw_section_separator(layout)
     draw_detect_views_section(
