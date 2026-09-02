@@ -20,6 +20,7 @@ import base64 as _b64
 from bpy.types import Operator
 from mixar.config.logging_config import get_logger
 from mixar.modules.moodboard.core.media_utils import is_still_item
+from mixar.modules.moodboard.core.tripo_catalog import is_tripo_generation_model
 
 logger = get_logger(__name__)
 
@@ -157,10 +158,11 @@ class MIXIE_OT_model_gen_generate(Operator):
             self.report({"WARNING"}, "Please wait for models to load")
             return {"CANCELLED"}
 
-        if (
-            model.lower() == "tripo-low"
-            and getattr(tab, 'tripo_input_mode', 'SINGLE') == 'MULTI'
-        ):
+        is_tripo = is_tripo_generation_model(service_key, model)
+        if is_tripo and getattr(tab, "tripo_use_direct_api", False):
+            return self._execute_tripo_direct(context, tab, model, service_key)
+
+        if is_tripo and getattr(tab, 'tripo_input_mode', 'SINGLE') == 'MULTI':
             return self._execute_tripo_multi_backend(
                 context, tab, model, service_key
             )
@@ -266,6 +268,145 @@ class MIXIE_OT_model_gen_generate(Operator):
         self.report({"INFO"}, "Added to queue")
         return {"FINISHED"}
 
+    def _execute_tripo_direct(self, context, tab, model, service_key):
+        """Submit text, image, or multiview generation to Tripo v3 BYOK."""
+        from mixar.modules.common.secure_storage import (
+            get_secret,
+            masked_preview,
+            set_secret,
+        )
+        from mixar.modules.common.utils.image_utils import compress_for_service
+        from mixar.modules.moodboard.core.generation_enqueue import (
+            derive_model_name,
+            make_model_rename_on_imported,
+            model_front_zrot,
+        )
+        from mixar.modules.moodboard.core.tripo_client import validate_api_key
+        from mixar.modules.moodboard.core.tripo_direct_job import (
+            enqueue_tripo_direct_job,
+        )
+
+        entered_key = (getattr(tab, "tripo_api_key", "") or "").strip()
+        try:
+            api_key = validate_api_key(entered_key or get_secret("tripo_api_key"))
+        except ValueError as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        if entered_key:
+            if not set_secret("tripo_api_key", api_key):
+                self.report({"ERROR"}, "Could not store the Tripo API key securely")
+                return {"CANCELLED"}
+            tab.tripo_key_preview = masked_preview(api_key)
+            tab.tripo_api_key = ""
+
+        prompt = (getattr(tab, "prompt", "") or "").strip()
+        selected_mode = getattr(tab, "tripo_input_mode", "SINGLE")
+        image_refs = {}
+        if selected_mode == "MULTI":
+            image_refs = {
+                "front": getattr(tab, "tripo_front_image", None),
+                "left": getattr(tab, "tripo_left_image", None),
+                "back": getattr(tab, "tripo_back_image", None),
+                "right": getattr(tab, "tripo_right_image", None),
+            }
+            present = {key: value for key, value in image_refs.items() if value}
+            if image_refs["front"] is None or len(present) < 2:
+                self.report(
+                    {"ERROR"},
+                    "Multi View requires Front plus at least one other view",
+                )
+                return {"CANCELLED"}
+            input_mode = "MULTI"
+            if prompt:
+                self.report(
+                    {"WARNING"},
+                    "Direct Tripo Multi View uses the views; prompt is ignored",
+                )
+        else:
+            image = self._get_input_image(context, tab)
+            if image is not None:
+                image_refs = {"front": image}
+                input_mode = "SINGLE"
+                if prompt:
+                    self.report(
+                        {"WARNING"},
+                        "Direct Tripo image mode uses the image; prompt is ignored",
+                    )
+            elif prompt:
+                input_mode = "TEXT"
+            else:
+                self.report({"ERROR"}, "Provide an image or a prompt")
+                return {"CANCELLED"}
+
+        images = {}
+        try:
+            for view, image in image_refs.items():
+                if image is None:
+                    continue
+                data = compress_for_service(image, "image_to_3d")
+                if not data:
+                    raise ValueError(f"'{image.name}' has no pixel data")
+                images[view] = data
+        except Exception as exc:
+            self.report({"ERROR"}, f"Failed to process Tripo image: {exc}")
+            return {"CANCELLED"}
+
+        route = _routing(service_key)
+        feature_key = route["feature_key"]
+        front_image = image_refs.get("front")
+        label = (
+            f"{front_image.name} ({'Multi View' if input_mode == 'MULTI' else 'Tripo'})"
+            if front_image
+            else (prompt[:40] or "Tripo")
+        )
+        mesh_name = derive_model_name(front_image, prompt)
+        on_imported = make_model_rename_on_imported(
+            mesh_name, model_front_zrot(model)
+        )
+
+        try:
+            job = enqueue_tripo_direct_job(
+                feature_key=feature_key,
+                label=label,
+                scene_flag=route.get("scene_flag", ""),
+                batch_popup_title=route.get("batch_popup_title", ""),
+                service=service_key,
+                origin_capability_key="model_gen",
+                model=model,
+                input_mode=input_mode,
+                api_model=getattr(tab, "tripo_api_model", "v3.1-20260211"),
+                images=images,
+                prompt=prompt,
+                api_key=api_key,
+                texture=getattr(tab, "tripo_texture", True),
+                pbr=getattr(tab, "tripo_pbr", True),
+                face_limit=getattr(tab, "tripo_face_limit", 0),
+                model_seed=getattr(tab, "tripo_model_seed", 0),
+                texture_quality=getattr(
+                    tab, "tripo_texture_quality", "standard"
+                ),
+                geometry_quality=getattr(
+                    tab, "tripo_geometry_quality", "standard"
+                ),
+                texture_alignment=getattr(
+                    tab, "tripo_texture_alignment", "original_image"
+                ),
+                orientation=getattr(tab, "tripo_orientation", "default"),
+                _on_imported_hook=on_imported,
+            )
+            if not job:
+                self.report({"WARNING"}, "A duplicate generation is already queued")
+                return {"CANCELLED"}
+        except Exception as exc:
+            self.report({"ERROR"}, f"Failed to start direct Tripo generation: {exc}")
+            return {"CANCELLED"}
+
+        from mixar.modules.common.job_queue.ui.lists.queue_uilist import mark_enqueued
+
+        mark_enqueued(feature_key)
+        self.report({"INFO"}, "Direct Tripo generation added to queue")
+        return {"FINISHED"}
+
     def _execute_tripo_multi_backend(self, context, tab, model, service_key):
         """Submit Tripo Multi View through the same Mixar backend as Single.
 
@@ -365,8 +506,32 @@ class MIXIE_OT_model_gen_generate(Operator):
         return {"FINISHED"}
 
 
+class MIXIE_OT_tripo_clear_api_key(Operator):
+    """Remove the direct Tripo credential from the OS credential vault."""
+
+    bl_idname = "mixie.tripo_clear_api_key"
+    bl_label = "Remove Saved Tripo Key"
+    bl_description = "Remove the saved Tripo API key from this computer"
+    bl_options = {"REGISTER"}
+
+    def execute(self, context):
+        from mixar.modules.common.secure_storage import delete_secret
+
+        if not delete_secret("tripo_api_key"):
+            self.report({"ERROR"}, "Could not remove the saved Tripo API key")
+            return {"CANCELLED"}
+        sidebar = getattr(context.scene, "mixie_moodboard_sidebar", None)
+        tab = getattr(sidebar, "tab_image_to_3d", None) if sidebar else None
+        if tab is not None:
+            tab.tripo_api_key = ""
+            tab.tripo_key_preview = ""
+        self.report({"INFO"}, "Saved Tripo API key removed")
+        return {"FINISHED"}
+
+
 classes = (
     MIXIE_OT_model_gen_generate,
+    MIXIE_OT_tripo_clear_api_key,
 )
 
 

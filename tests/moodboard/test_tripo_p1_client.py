@@ -14,7 +14,7 @@ def test_upload_create_poll_uses_official_p1_v3_schema():
     polls = {"count": 0}
 
     def handler(request):
-        assert request.headers["authorization"] == "Bearer secret"
+        assert request.headers["authorization"] == "Bearer tsk_secret"
         if request.url.path.endswith("/files"):
             assert b"Content-Type: image/jpeg" in request.content
             view = "front" if b"front.jpg" in request.content else "left"
@@ -38,7 +38,7 @@ def test_upload_create_poll_uses_official_p1_v3_schema():
             },
         )
 
-    client = TripoP1Client("secret", transport=httpx.MockTransport(handler))
+    client = TripoP1Client("tsk_secret", transport=httpx.MockTransport(handler))
     try:
         tokens = {
             "front": client.upload_image(b"\xff\xd8\xfffront", "front.png"),
@@ -58,10 +58,15 @@ def test_upload_create_poll_uses_official_p1_v3_schema():
         client.close()
 
     assert created == {
-        "inputs": [{"front": "file-front"}, {"left": "file-left"}],
+        "files": [
+            {"view": "front", "file": {"file_token": "file-front"}},
+            {"view": "left", "file": {"file_token": "file-left"}},
+        ],
         "model": "P1-20260311",
         "texture": False,
         "pbr": False,
+        "texture_quality": "standard",
+        "geometry_quality": "standard",
         "texture_alignment": "geometry",
         "orientation": "align_image",
         "face_limit": 500,
@@ -72,7 +77,7 @@ def test_upload_create_poll_uses_official_p1_v3_schema():
 
 def test_front_and_second_view_are_required():
     client = TripoP1Client(
-        "secret", transport=httpx.MockTransport(lambda request: None)
+        "tsk_secret", transport=httpx.MockTransport(lambda request: None)
     )
     try:
         with pytest.raises(ValueError, match="Front"):
@@ -90,7 +95,7 @@ def test_upload_rejects_unsupported_image_bytes_before_request():
         requested.append(request)
         return httpx.Response(200, json={})
 
-    client = TripoP1Client("secret", transport=httpx.MockTransport(handler))
+    client = TripoP1Client("tsk_secret", transport=httpx.MockTransport(handler))
     try:
         with pytest.raises(ValueError, match="PNG, JPEG, or WebP"):
             client.upload_image(b"not-an-image", "front.png")
@@ -107,7 +112,7 @@ def test_upload_accepts_webp_and_uses_matching_content_type():
         seen["body"] = request.content
         return httpx.Response(200, json={"code": 0, "data": {"file_token": "webp"}})
 
-    client = TripoP1Client("secret", transport=httpx.MockTransport(handler))
+    client = TripoP1Client("tsk_secret", transport=httpx.MockTransport(handler))
     try:
         token = client.upload_image(b"RIFF\x00\x00\x00\x00WEBPdata", "front.jpg")
     finally:
@@ -132,7 +137,7 @@ def test_poll_failure_is_user_visible():
             },
         )
 
-    client = TripoP1Client("secret", transport=httpx.MockTransport(handler))
+    client = TripoP1Client("tsk_secret", transport=httpx.MockTransport(handler))
     try:
         with pytest.raises(TripoP1Error, match="bad views"):
             client.wait_for_model("task", interval=0.01)
@@ -142,7 +147,7 @@ def test_poll_failure_is_user_visible():
 
 def test_poll_rejects_unknown_status_instead_of_waiting_until_timeout():
     client = TripoP1Client(
-        "secret",
+        "tsk_secret",
         transport=httpx.MockTransport(
             lambda _request: httpx.Response(
                 200, json={"code": 0, "data": {"status": "mystery"}}
@@ -169,7 +174,7 @@ def test_poll_rejects_unsafe_model_download_url():
             },
         )
 
-    client = TripoP1Client("secret", transport=httpx.MockTransport(handler))
+    client = TripoP1Client("tsk_secret", transport=httpx.MockTransport(handler))
     try:
         with pytest.raises(TripoP1Error, match="invalid model download URL"):
             client.wait_for_model("task", interval=0.01)
@@ -178,7 +183,7 @@ def test_poll_rejects_unsafe_model_download_url():
 
 
 def test_http_error_does_not_echo_tripo_api_key():
-    secret = "tripo-secret-123"
+    secret = "tsk_tripo-secret-123"
 
     client = TripoP1Client(
         secret,
@@ -199,7 +204,7 @@ def test_http_error_does_not_echo_tripo_api_key():
 
 
 def test_api_error_body_does_not_echo_tripo_api_key():
-    secret = "tripo-secret-456"
+    secret = "tsk_tripo-secret-456"
     client = TripoP1Client(
         secret,
         transport=httpx.MockTransport(

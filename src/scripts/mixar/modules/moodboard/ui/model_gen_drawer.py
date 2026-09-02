@@ -21,6 +21,7 @@ from .sidebar_ui_helpers import (
     draw_section_box,
     draw_section_separator,
 )
+from ..core.tripo_catalog import is_tripo_generation_model
 
 _MODEL_GEN_GENERATE = "mixie.model_gen_generate"
 _MODEL_GEN_FOOTER = {
@@ -60,16 +61,16 @@ def _draw_model_gen(layout, context):
         "model_gen", getattr(tab, "mode", "")
     ) or "model_3d"
     model_slug = getattr(tab, "model", "")
-    is_tripo_low = model_slug.lower() == "tripo-low"
+    is_tripo = is_tripo_generation_model(service_key, model_slug)
 
     draw_prompt_section(layout, tab, label="Prompt (optional)")
     draw_section_separator(layout)
 
-    if is_tripo_low:
+    if is_tripo:
         tabs = layout.row(align=True)
         tabs.prop(tab, "tripo_input_mode", expand=True)
 
-    is_tripo_multi = is_tripo_low and tab.tripo_input_mode == 'MULTI'
+    is_tripo_multi = is_tripo and tab.tripo_input_mode == 'MULTI'
     if is_tripo_multi:
         col = draw_section_box(layout, "Multi View Images", icon='RENDERLAYERS')
         grid = col.grid_flow(row_major=True, columns=2, even_columns=True)
@@ -89,7 +90,8 @@ def _draw_model_gen(layout, context):
             text="Front plus at least one other view is required.",
             icon='INFO',
         )
-        col.label(text="Uses the same Mixar backend as Single.", icon='CHECKMARK')
+        if not tab.tripo_use_direct_api:
+            col.label(text="Uses the same Mixar backend as Single.", icon='CHECKMARK')
     else:
         col = draw_section_box(
             layout,
@@ -111,8 +113,6 @@ def _draw_model_gen(layout, context):
 
     draw_section_separator(layout)
 
-    # Single and Multi View intentionally share the same catalog-backed model
-    # parameters (Texture, Face Limit, etc.). No Tripo BYOK/API-key controls.
     col = draw_section_box(layout, "Settings", icon='SETTINGS')
     col.use_property_split = True
     col.use_property_decorate = False
@@ -120,6 +120,44 @@ def _draw_model_gen(layout, context):
         col, tab, "model_gen",
         model_refresh_op="mixie.image_to_3d_refresh_models",
     )
+
+    if is_tripo:
+        col.separator()
+        col.prop(tab, "tripo_use_direct_api")
+        if tab.tripo_use_direct_api:
+            col.prop(tab, "tripo_api_model")
+            col.prop(tab, "tripo_api_key")
+            if tab.tripo_key_preview:
+                col.label(
+                    text=f"Saved securely: {tab.tripo_key_preview}",
+                    icon='LOCKED',
+                )
+            else:
+                col.label(
+                    text="Enter tsk_ key, or leave blank to use a saved key",
+                    icon='INFO',
+                )
+            col.operator(
+                "mixie.tripo_clear_api_key",
+                text="Remove Saved Key",
+                icon='TRASH',
+            )
+            col.prop(tab, "tripo_texture")
+            texture_row = col.row()
+            texture_row.enabled = tab.tripo_texture
+            texture_row.prop(tab, "tripo_pbr")
+            col.prop(tab, "tripo_face_limit")
+            col.prop(tab, "tripo_geometry_quality")
+            texture_quality_row = col.row()
+            texture_quality_row.enabled = tab.tripo_texture
+            texture_quality_row.prop(tab, "tripo_texture_quality")
+            col.prop(tab, "tripo_texture_alignment")
+            col.prop(tab, "tripo_orientation")
+            col.prop(tab, "tripo_model_seed")
+            warning = col.column(align=True)
+            warning.alert = True
+            warning.label(text="Uses your Tripo credits directly.", icon='ERROR')
+            warning.label(text="Local cancel may not stop a remote task.")
 
     feature_key, gen_flag, generate_op = _MODEL_GEN_FOOTER.get(
         service_key, _MODEL_GEN_FOOTER["model_3d"])

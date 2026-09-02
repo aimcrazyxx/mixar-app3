@@ -437,15 +437,39 @@ class MixieMoodboardTabImageTo3DProps(PropertyGroup):
         update=_on_model_changed,
     )
 
-    # Tripo P1 is exposed under the existing catalog model ``tripo-low``.
-    # Single keeps the legacy backend path; Multi View uses Tripo's public v3
-    # endpoint directly because older Mixar backends do not expose it.
+    # Tripo can use the normal Mixar credit/backend route or an optional BYOK
+    # route to the provider's public v3 API. The key is SKIP_SAVE and is copied
+    # to the OS credential vault by the generate operator, never to a .blend.
     tripo_input_mode: EnumProperty(
         name="Input",
         items=(
-            ('SINGLE', "Single", "Use the existing single-image flow"),
-            ('MULTI', "Multi View", "Use Tripo P1 with labeled views"),
+            ('SINGLE', "Single", "Use one image, or the prompt when no image is selected"),
+            ('MULTI', "Multi View", "Use two to four labeled views"),
         ), default='SINGLE',
+    )
+    tripo_use_direct_api: BoolProperty(
+        name="Use Direct Tripo API",
+        description="Use your Tripo API key and Tripo credits instead of the Mixar backend",
+        default=False,
+    )
+    tripo_api_model: EnumProperty(
+        name="Tripo Model",
+        description="Provider model version used by the direct Tripo API",
+        items=(
+            (
+                'v3.1-20260211',
+                "Tripo 3.1 (Normal)",
+                "Current standard Tripo 3.1 generation model",
+                0,
+            ),
+            (
+                'P1-20260311',
+                "Tripo P1",
+                "Tripo P1 generation model",
+                1,
+            ),
+        ),
+        default='v3.1-20260211',
     )
     tripo_front_image: PointerProperty(type=bpy.types.Image, name="Front")
     tripo_left_image: PointerProperty(type=bpy.types.Image, name="Left")
@@ -458,6 +482,22 @@ class MixieMoodboardTabImageTo3DProps(PropertyGroup):
         description="0 lets Tripo choose; otherwise 50-20,000",
     )
     tripo_model_seed: IntProperty(name="Model Seed", default=0, min=0)
+    tripo_texture_quality: EnumProperty(
+        name="Texture Quality",
+        items=(
+            ('standard', "Standard", "Faster texture generation"),
+            ('detailed', "Detailed", "Higher-detail texture generation"),
+        ),
+        default='standard',
+    )
+    tripo_geometry_quality: EnumProperty(
+        name="Geometry Quality",
+        items=(
+            ('standard', "Standard", "Faster geometry generation"),
+            ('detailed', "Detailed", "Higher-detail geometry generation"),
+        ),
+        default='standard',
+    )
     tripo_texture_alignment: EnumProperty(
         name="Texture Alignment",
         items=(
