@@ -68,13 +68,17 @@ CODEX_PROVIDER_ITEM = (
 # Prefilled model slug — the current Codex lineup; the user can edit it.
 CODEX_DEFAULT_MODEL = "gpt-5.5"
 
-# Direct, client-side OpenAI-compatible provider.  Unlike the catalog-backed
-# providers this talks to the user-supplied endpoint from Mixar itself.
+# Custom OpenAI-compatible provider. It can use Mixar's full backend
+# orchestrator through the device relay (the default) or the smaller direct
+# client-side agent as an explicit compatibility fallback.
 OPENAI_COMPATIBLE_PROVIDER_ID = 'openai-compatible'
+OPENAI_COMPATIBLE_BACKEND_PROVIDER_ID = 'local'
+OPENAI_COMPATIBLE_ROUTE_MIXAR = 'MIXAR'
+OPENAI_COMPATIBLE_ROUTE_DIRECT = 'DIRECT'
 OPENAI_COMPATIBLE_PROVIDER_ITEM = (
     OPENAI_COMPATIBLE_PROVIDER_ID,
     "OpenAI Compatible (Custom)",
-    "Use a custom OpenAI-compatible /v1 endpoint directly from Mixar",
+    "Use a custom OpenAI-compatible /v1 endpoint with the Mixar orchestrator",
 )
 OPENAI_COMPATIBLE_DEFAULT_BASE_URL = "https://api.openai.com/v1"
 OPENAI_COMPATIBLE_DEFAULT_MODEL = "gpt-5.4"

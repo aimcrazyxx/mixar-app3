@@ -968,26 +968,40 @@ def test_debug_report_keeps_non_secret_token_counts():
 
 
 @pytest.mark.parametrize(
-    "enabled, provider, expected",
+    "enabled, provider, route, expected",
     [
-        (True, "openai-compatible", True),
-        (True, "openai", False),
-        (True, "openrouter", False),
-        (True, " openai-compatible", False),
-        (True, "OPENAI-COMPATIBLE", False),
-        (False, "openai-compatible", False),
-        (True, "", False),
+        (True, "openai-compatible", "DIRECT", True),
+        (True, "openai-compatible", "MIXAR", False),
+        (True, "openai-compatible", "", False),
+        (True, "openai", "DIRECT", False),
+        (True, "openrouter", "DIRECT", False),
+        (True, " openai-compatible", "DIRECT", False),
+        (True, "OPENAI-COMPATIBLE", "DIRECT", False),
+        (False, "openai-compatible", "DIRECT", False),
+        (True, "", "DIRECT", False),
     ],
 )
 def test_direct_route_requires_explicit_custom_provider_selection(
-    enabled, provider, expected
+    enabled, provider, route, expected
 ):
     wm = SimpleNamespace(
         byok_custom_enabled=enabled,
         byok_current_provider=provider,
+        byok_custom_active_route=route,
     )
 
     assert custom_agent_runtime.is_active(wm) is expected
+
+
+def test_unsaved_route_edit_does_not_change_active_chat_route():
+    wm = SimpleNamespace(
+        byok_custom_enabled=True,
+        byok_current_provider="openai-compatible",
+        byok_custom_active_route="DIRECT",
+        byok_custom_route="MIXAR",
+    )
+
+    assert custom_agent_runtime.is_active(wm) is True
 
 
 def test_switching_from_backend_to_direct_starts_a_fresh_wire_session():

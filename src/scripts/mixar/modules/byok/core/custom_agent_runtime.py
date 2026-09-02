@@ -13,7 +13,10 @@ import uuid
 from mixar.config.logging_config import get_logger
 from mixar.modules.common.secure_storage import get_secret
 
-from ..constants import OPENAI_COMPATIBLE_PROVIDER_ID
+from ..constants import (
+    OPENAI_COMPATIBLE_PROVIDER_ID,
+    OPENAI_COMPATIBLE_ROUTE_DIRECT,
+)
 from .agent_loop import SYSTEM_PROMPT, run_agent_loop
 from .debug_report import to_json
 from .openai_compatible import (
@@ -49,9 +52,12 @@ def is_active(wm=None) -> bool:
             import bpy
 
             wm = bpy.context.window_manager
-        return bool(getattr(wm, "byok_custom_enabled", False)) and (
-            getattr(wm, "byok_current_provider", "")
+        return (
+            bool(getattr(wm, "byok_custom_enabled", False))
+            and getattr(wm, "byok_current_provider", "")
             == OPENAI_COMPATIBLE_PROVIDER_ID
+            and getattr(wm, "byok_custom_active_route", "")
+            == OPENAI_COMPATIBLE_ROUTE_DIRECT
         )
     except Exception:
         return False

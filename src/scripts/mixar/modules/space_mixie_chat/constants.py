@@ -130,6 +130,8 @@ class JSONRPCMethod:
     BLENDER_EXECUTE_SCRIPT = "blender.execute_script"
     # Server -> Client (request - sandbox lifecycle; handled by the parent only)
     AGENT_SANDBOX_CONTROL = "agent.sandbox_control"
+    # Server -> Client (request - execute an approved compatible-provider call)
+    LLM_REQUEST = "llm.request"
 
     # Server -> Client (notifications - no response)
     AGENT_TOOL_START = "agent.tool_start"

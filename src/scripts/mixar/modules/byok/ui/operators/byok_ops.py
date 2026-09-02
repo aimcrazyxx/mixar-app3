@@ -71,6 +71,18 @@ def _wipe_form_secrets(wm):
             )
 
 
+def _clear_custom_local_state(wm):
+    """Remove the local compatible-provider trust anchor and UI override."""
+    from mixar.modules.common.secure_storage import delete_secret
+
+    delete_secret('openai_compatible_api_key')
+    delete_secret('openai_compatible_config')
+    wm.byok_custom_enabled = False
+    wm.byok_custom_active_route = ''
+    _clear_cached_state(wm)
+    _wipe_form_secrets(wm)
+
+
 def _apply_cached_state(wm, data):
     """Write the server's `data.items[0]` into the cached display fields.
 
@@ -150,6 +162,8 @@ class MIXAR_BYOK_OT_open_dialog(Operator):
                 if wm.byok_current_model:
                     wm.byok_form_codex_model = wm.byok_current_model
             elif model_suggestions.is_openai_compatible(wm.byok_current_provider):
+                if wm.byok_custom_active_route:
+                    wm.byok_custom_route = wm.byok_custom_active_route
                 if wm.byok_current_model:
                     wm.byok_custom_model = wm.byok_current_model
             elif wm.byok_current_model:
@@ -441,10 +455,10 @@ class MIXAR_BYOK_OT_save(Operator):
         if wm.byok_dialog_state == 'SAVING':
             return False
         if model_suggestions.is_openai_compatible(wm.byok_form_provider):
-            from mixar.modules.common.secure_storage import get_secret
-            key = wm.byok_custom_api_key_visible if wm.byok_custom_show_key else wm.byok_custom_api_key
-            return bool(wm.byok_custom_base_url.strip() and wm.byok_custom_model.strip()) and bool(
-                key.strip() or get_secret('openai_compatible_api_key') or wm.byok_custom_headers.strip()
+            # Local servers such as Ollama commonly require no credential.
+            return bool(
+                wm.byok_custom_base_url.strip()
+                and wm.byok_custom_model.strip()
             )
         if model_suggestions.is_openrouter(wm.byok_form_provider):
             # OpenRouter needs a model slug + API key.
@@ -552,6 +566,7 @@ def _on_save_done(success: bool, data, err):
         if success:
             from mixar.modules.common.secure_storage import delete_secret
             wm.byok_custom_enabled = False
+            wm.byok_custom_active_route = ''
             delete_secret('openai_compatible_api_key')
             delete_secret('openai_compatible_config')
             _apply_cached_state(wm, data or {})
@@ -673,12 +688,18 @@ class MIXAR_BYOK_OT_confirm_remove(Operator):
     def execute(self, context):
         wm = context.window_manager
         if model_suggestions.is_openai_compatible(wm.byok_current_provider):
-            from mixar.modules.common.secure_storage import delete_secret
-            delete_secret('openai_compatible_api_key')
-            delete_secret('openai_compatible_config')
-            wm.byok_custom_enabled = False
-            _clear_cached_state(wm)
-            _wipe_form_secrets(wm)
+            from ...constants import OPENAI_COMPATIBLE_ROUTE_MIXAR
+
+            if wm.byok_custom_active_route == OPENAI_COMPATIBLE_ROUTE_MIXAR:
+                wm.byok_dialog_state = 'SAVING'
+                wm.byok_last_error = ''
+                _redraw_mixie_chat_areas()
+                byok_client.delete_credentials(
+                    on_done=_on_custom_relay_delete_done
+                )
+                return {'FINISHED'}
+
+            _clear_custom_local_state(wm)
             wm.byok_dialog_state = 'IDLE'
             _redraw_mixie_chat_areas()
             # A backend BYOK credential may still exist because the direct
@@ -692,6 +713,22 @@ class MIXAR_BYOK_OT_confirm_remove(Operator):
 
         byok_client.delete_credentials(on_done=_on_delete_done)
         return {'FINISHED'}
+
+
+def _on_custom_relay_delete_done(success: bool, _removed_count: int, err):
+    """Delete local relay approval only after backend unregister succeeds."""
+    try:
+        wm = bpy.context.window_manager
+        if success:
+            _clear_custom_local_state(wm)
+            wm.byok_dialog_state = 'IDLE'
+            wm.byok_last_error = ''
+        else:
+            wm.byok_dialog_state = 'ERROR'
+            wm.byok_last_error = err or "Could not unregister the Mixar relay."
+        _redraw_mixie_chat_areas()
+    except Exception as exc:
+        logger.error("Custom relay delete callback failed: %s", exc, exc_info=True)
 
 
 def _on_delete_done(success: bool, removed_count: int, err):
@@ -737,8 +774,12 @@ def _on_fetch_done(success: bool, data, err):
     """
     try:
         wm = bpy.context.window_manager
-        from mixar.modules.byok.core.custom_agent_runtime import is_active
-        if is_active(wm):
+        if (
+            getattr(wm, 'byok_custom_enabled', False)
+            and model_suggestions.is_openai_compatible(
+                getattr(wm, 'byok_current_provider', '')
+            )
+        ):
             return
         if success:
             _apply_cached_state(wm, data or {})

@@ -34,6 +34,8 @@ from ...constants import (
     DIALOG_STATE_ITEMS,
     OPENAI_COMPATIBLE_DEFAULT_BASE_URL,
     OPENAI_COMPATIBLE_DEFAULT_MODEL,
+    OPENAI_COMPATIBLE_ROUTE_DIRECT,
+    OPENAI_COMPATIBLE_ROUTE_MIXAR,
     OPENROUTER_DEFAULT_MODEL,
 )
 from ...core import custom_model_cache
@@ -120,6 +122,8 @@ _WM_ATTRS = (
     'byok_dialog_state',
     'byok_last_error',
     'byok_custom_enabled',
+    'byok_custom_route',
+    'byok_custom_active_route',
     'byok_custom_base_url',
     'byok_custom_api_key',
     'byok_custom_api_key_visible',
@@ -227,8 +231,27 @@ def register():
     )
     WM.byok_last_error = StringProperty(default='')
 
-    # --- Direct OpenAI-compatible provider (non-secret config) ---
+    # --- OpenAI-compatible provider (non-secret live form state) ---
     WM.byok_custom_enabled = BoolProperty(default=False, options={'SKIP_SAVE'})
+    WM.byok_custom_route = EnumProperty(
+        name="Agent route",
+        description="Choose which agent orchestrates requests to this endpoint",
+        items=(
+            (
+                OPENAI_COMPATIBLE_ROUTE_MIXAR,
+                "Mixar Orchestrator",
+                "Use Mixar's full planner and Blender toolset through the secure device relay",
+            ),
+            (
+                OPENAI_COMPATIBLE_ROUTE_DIRECT,
+                "Direct Agent",
+                "Run the lightweight compatible-provider agent inside Blender",
+            ),
+        ),
+        default=OPENAI_COMPATIBLE_ROUTE_MIXAR,
+    )
+    # Saved route used by chat while the dialog's editable route changes.
+    WM.byok_custom_active_route = StringProperty(default='', options={'SKIP_SAVE'})
     WM.byok_custom_base_url = StringProperty(
         name="Base URL", default=OPENAI_COMPATIBLE_DEFAULT_BASE_URL,
         description="API root; Mixar normalizes this to exactly one /v1",
@@ -306,6 +329,16 @@ def register():
             if not raw:
                 return None
             data = json.loads(raw)
+            # Configs saved before the relay existed were direct-only. Keep
+            # that proven route on upgrade; new configs default to Mixar.
+            route = data.get('route', OPENAI_COMPATIBLE_ROUTE_DIRECT)
+            if route not in {
+                OPENAI_COMPATIBLE_ROUTE_MIXAR,
+                OPENAI_COMPATIBLE_ROUTE_DIRECT,
+            }:
+                route = OPENAI_COMPATIBLE_ROUTE_DIRECT
+            wm.byok_custom_route = route
+            wm.byok_custom_active_route = route
             wm.byok_custom_base_url = data.get('base_url', wm.byok_custom_base_url)
             wm.byok_custom_model = data.get('model', wm.byok_custom_model)
             wm.byok_custom_timeout = data.get('timeout', wm.byok_custom_timeout)
