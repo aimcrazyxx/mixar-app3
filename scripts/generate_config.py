@@ -52,7 +52,22 @@ def generate_config(version_file: str) -> dict:
     inside the runtime bundle.
     """
 
-    version = _env("MIXAR_VERSION") or _read_version(version_file)
+    # VERSION is canonical for release builds. A stale MIXAR_VERSION inherited
+    # from a shell or CI environment must never make mixar.json disagree with
+    # the version compiled into the binary. Keep the env var only as a fallback
+    # for unusual source trees that genuinely do not have a VERSION file.
+    file_version = _read_version(version_file)
+    env_version = _env("MIXAR_VERSION")
+    if file_version and file_version != "0.0.0":
+        version = file_version
+        if env_version and env_version != file_version:
+            print(
+                f"Warning: ignoring MIXAR_VERSION={env_version}; "
+                f"VERSION is {file_version}"
+            )
+    else:
+        version = env_version or file_version or "0.0.0"
+
     environment = _env("MIXAR_ENV", "Prod")
 
     bypass_enabled = _env_bool("DEV_BYPASS_ENABLED", False)

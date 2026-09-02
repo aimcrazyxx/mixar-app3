@@ -11,7 +11,6 @@ Centralized configuration values for the Mixie Chat module.
 
 from enum import Enum
 
-
 # ============================================================================
 # DEVELOPMENT MODE
 # ============================================================================
@@ -44,9 +43,11 @@ SSE_CONNECT_RETRY_DELAYS = (1.0, 2.0, 4.0, 8.0, 15.0)
 #   for normal / sandbox mode. It intentionally matches NO scene.mixie_session_id
 #   so the client follows in-script window.scene changes (active-scene follow).
 # - An empty session_id has the same "no explicit scene" meaning.
-# - Any OTHER non-empty session is a REAL per-scene target: either the user's
-#   main scene mixie_session_id (a UUID v4 set by SessionManager.start_session)
-#   or a throwaway lane scene keyed "agentlane:{parent}:{n}" (scene-build mode).
+# - Any OTHER non-empty session received from the backend is a REAL per-scene
+#   target: either the user's main scene mixie_session_id (normally a UUID v4
+#   set by SessionManager.start_session) or a throwaway lane scene keyed
+#   "agentlane:{parent}:{n}" (scene-build mode). Direct-provider ids use a
+#   separate local-only prefix and are never placed on this backend channel.
 #   These MUST resolve to a scene or the script is rejected — running one against
 #   the wrong (active) scene corrupts the user's work.
 AGENT_ROUTING_SESSION_PREFIX = "agent:"     # non-pinned constant → active scene
@@ -129,6 +130,8 @@ class JSONRPCMethod:
     BLENDER_EXECUTE_SCRIPT = "blender.execute_script"
     # Server -> Client (request - sandbox lifecycle; handled by the parent only)
     AGENT_SANDBOX_CONTROL = "agent.sandbox_control"
+    # Server -> Client (request - execute an approved compatible-provider call)
+    LLM_REQUEST = "llm.request"
 
     # Server -> Client (notifications - no response)
     AGENT_TOOL_START = "agent.tool_start"
@@ -238,7 +241,7 @@ WS_LIVENESS_PROBE_GRACE = 5.0
 # status surfaces (bubble pill, chat header) stop implying a healthy
 # connection. A healthy connection carries at least a pong per ~15s ping, so
 # ping interval + 5s grace of silence almost certainly means the network is
-# gone — the pill flips to Reconnecting/Disconnected here (~5–20s after the
+# gone — the pill flips to Reconnecting/Disconnected here (~5-20s after the
 # drop) instead of waiting out the full teardown watchdog above. Deliberately
 # a SEPARATE, earlier threshold: send-gating keeps using is_connected because
 # a false "down" there would drop work, while a false "down" on a label is

@@ -367,6 +367,7 @@ class MIXIE_CHAT_OT_select_slot_action(Operator):
                     session_id=session.get_session_id(scene),
                     action=self.action_value,
                     auth_token=auth_token,
+                    instance_id=session.instance_id,
                 )
 
                 if success:

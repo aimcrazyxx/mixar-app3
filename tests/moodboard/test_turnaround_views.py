@@ -402,6 +402,29 @@ def test_agent_model_3d_payload_includes_the_active_companion_set(accepts_mv):
     assert warnings == []
 
 
+def test_tripo_v31_bound_set_bypasses_a_stale_catalog_flag(monkeypatch):
+    """The client implements Tripo 3.1 multi-view even if its row says false."""
+    scene = _scene(("orc_left", "left", "k/left.png"))
+    main_image = _main(scene=scene, main_of="g1")
+    row = {"slug": "tripo-v31", "supports_multi_view": False}
+    monkeypatch.setattr(
+        "mixar.bootstrap.generation_catalog_cache.get_model",
+        lambda _service, _model: row,
+    )
+
+    payload, warnings = build_active_group_payload(
+        scene, main_image, "model_3d", "tripo-v31"
+    )
+
+    assert payload == {
+        "image_s3_key": "k/main.png",
+        "multi_view_images": [
+            {"s3_key": "k/left.png", "view_type": "left"},
+        ],
+    }
+    assert warnings == []
+
+
 def test_an_unrelated_image_never_inherits_a_set_active_elsewhere(accepts_mv):
     """The production regression: turn 1 detects a Ganesha turnaround, turn 2
     converts an unrelated dragon image. The dragon is not the set's frontal

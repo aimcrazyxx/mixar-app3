@@ -1,0 +1,356 @@
+# SPDX-FileCopyrightText: 2026 Adeveda Enterprises Private Limited
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+"""Async operators for the OpenAI-compatible provider routes."""
+
+import json
+import threading
+from dataclasses import replace
+
+import bpy
+from bpy.types import Operator
+from mixar.config.logging_config import get_logger
+from mixar.modules.common.secure_storage import (
+    delete_secret,
+    get_secret,
+    masked_preview,
+    set_secret,
+)
+
+from ...core import byok_client
+from ...core.custom_model_cache import replace as replace_custom_models
+from ...core.openai_compatible import (
+    OpenAICompatibleConfig,
+    OpenAICompatibleProvider,
+    parse_custom_headers,
+)
+from ...constants import (
+    OPENAI_COMPATIBLE_BACKEND_PROVIDER_ID,
+    OPENAI_COMPATIBLE_ROUTE_DIRECT,
+    OPENAI_COMPATIBLE_ROUTE_MIXAR,
+)
+
+logger = get_logger(__name__)
+
+
+def _redraw():
+    try:
+        for window in bpy.context.window_manager.windows:
+            for area in window.screen.areas:
+                area.tag_redraw()
+    except Exception as exc:
+        logger.debug("Could not redraw custom-provider UI: %s", type(exc).__name__)
+
+
+def _key_value(wm) -> str:
+    field = (
+        "byok_custom_api_key_visible"
+        if wm.byok_custom_show_key
+        else "byok_custom_api_key"
+    )
+    return getattr(wm, field, "").strip() or get_secret("openai_compatible_api_key")
+
+
+def _config(wm, key: str) -> OpenAICompatibleConfig:
+    return OpenAICompatibleConfig(
+        base_url=wm.byok_custom_base_url,
+        api_key=key,
+        model=wm.byok_custom_model,
+        timeout=wm.byok_custom_timeout,
+        max_output_tokens=wm.byok_custom_max_output_tokens,
+        temperature=wm.byok_custom_temperature
+        if wm.byok_custom_use_temperature
+        else None,
+        top_p=wm.byok_custom_top_p if wm.byok_custom_use_top_p else None,
+        reasoning_effort=(
+            wm.byok_custom_reasoning_effort
+            if wm.byok_custom_reasoning_effort != "NONE"
+            else ""
+        ),
+        custom_headers=parse_custom_headers(wm.byok_custom_headers),
+        context_limit=wm.byok_custom_context_limit,
+        tool_calling=wm.byok_custom_tool_calling,
+        vision=wm.byok_custom_vision,
+        streaming=wm.byok_custom_streaming,
+        endpoint_mode=wm.byok_custom_endpoint_mode,
+    )
+
+
+def _route(wm) -> str:
+    route = getattr(wm, "byok_custom_route", OPENAI_COMPATIBLE_ROUTE_MIXAR)
+    if route not in {
+        OPENAI_COMPATIBLE_ROUTE_MIXAR,
+        OPENAI_COMPATIBLE_ROUTE_DIRECT,
+    }:
+        raise ValueError("Choose a valid OpenAI-compatible agent route")
+    return route
+
+
+def _stored_config(config: OpenAICompatibleConfig, route: str) -> dict:
+    stored = {
+        name: getattr(config, name)
+        for name in (
+            "base_url",
+            "model",
+            "timeout",
+            "max_output_tokens",
+            "temperature",
+            "top_p",
+            "reasoning_effort",
+            "custom_headers",
+            "context_limit",
+            "tool_calling",
+            "vision",
+            "streaming",
+            "endpoint_mode",
+        )
+    }
+    stored["route"] = route
+    stored["relay_registered"] = route == OPENAI_COMPATIBLE_ROUTE_MIXAR
+    return stored
+
+
+def _restore_secret(name: str, previous: str) -> bool:
+    return set_secret(name, previous) if previous else delete_secret(name)
+
+
+def start_request(wm, *, action: str):
+    try:
+        key = _key_value(wm)
+        config = _config(wm, key)
+        route = _route(wm)
+    except Exception as exc:
+        wm.byok_dialog_state = "ERROR"
+        wm.byok_last_error = str(exc)
+        return {"CANCELLED"}
+    wm.byok_dialog_state = "SAVING"
+    wm.byok_last_error = ""
+    _redraw()
+
+    def _worker():
+        provider = None
+        previous_key = get_secret("openai_compatible_api_key")
+        previous_config = get_secret("openai_compatible_config")
+        wrote_local_state = False
+        try:
+            # The backend orchestrator currently speaks Chat Completions. An
+            # Auto/Responses preference remains stored for Direct mode, but a
+            # Mixar save proves that the required endpoint actually works.
+            probe_config = (
+                replace(config, endpoint_mode="chat_completions")
+                if route == OPENAI_COMPATIBLE_ROUTE_MIXAR and action != "models"
+                else config
+            )
+            provider = OpenAICompatibleProvider(probe_config)
+            models = provider.list_models() if action == "models" else None
+            if action != "models":
+                provider.test_connection()
+            if action == "save":
+                wrote_local_state = True
+                if key and not set_secret("openai_compatible_api_key", key):
+                    raise RuntimeError(
+                        "The operating-system credential store rejected the API key"
+                    )
+                if not set_secret(
+                    "openai_compatible_config",
+                    json.dumps(_stored_config(config, route)),
+                ):
+                    raise RuntimeError("Could not persist the custom provider settings")
+                if route == OPENAI_COMPATIBLE_ROUTE_MIXAR:
+                    success, _data, backend_error = byok_client.save_credentials_now(
+                        provider=OPENAI_COMPATIBLE_BACKEND_PROVIDER_ID,
+                        model=config.model,
+                        base_url=config.base_url,
+                    )
+                    if not success:
+                        raise RuntimeError((
+                            "This Mixar backend does not support the secure "
+                            "OpenAI-compatible relay. Select Direct Agent or update "
+                            f"the backend. {backend_error or ''}"
+                        ).strip())
+                else:
+                    try:
+                        old_data = json.loads(previous_config) if previous_config else {}
+                    except (TypeError, ValueError):
+                        old_data = {}
+                    if old_data.get("relay_registered"):
+                        success, _removed, backend_error = (
+                            byok_client.delete_credentials_now()
+                        )
+                        if not success:
+                            raise RuntimeError((
+                                "Could not disable the previous Mixar relay route. "
+                                f"{backend_error or ''}"
+                            ).strip())
+            success, error = True, ""
+        except Exception as exc:
+            error = str(exc)
+            if wrote_local_state:
+                key_restored = _restore_secret(
+                    "openai_compatible_api_key", previous_key
+                )
+                config_restored = _restore_secret(
+                    "openai_compatible_config", previous_config
+                )
+                if not (key_restored and config_restored):
+                    error += ". The previous local settings could not be restored"
+            models, success = None, False
+        finally:
+            if provider is not None:
+                try:
+                    provider.close()
+                except Exception as exc:
+                    logger.debug(
+                        "Could not close custom provider client: %s",
+                        type(exc).__name__,
+                    )
+        byok_client._schedule_on_main(
+            _done, action, config, route, success, models, error
+        )
+
+    threading.Thread(
+        target=_worker,
+        daemon=True,
+        name=f"MixarCustomProvider-{action}",
+    ).start()
+    return {"FINISHED"}
+
+
+def _done(action, config, route, success, models, error):
+    wm = bpy.context.window_manager
+    if not success:
+        wm.byok_dialog_state = "ERROR"
+        wm.byok_last_error = error or "Provider request failed"
+        _redraw()
+        return
+    if action == "models":
+        replace_custom_models(models or [])
+        if models:
+            wm.byok_custom_discovered_model = models[0]
+    if action == "save":
+        wm.byok_custom_enabled = True
+        wm.byok_custom_route = route
+        wm.byok_custom_active_route = route
+        wm.byok_custom_base_url = config.base_url
+        wm.byok_is_active = True
+        wm.byok_current_provider = "openai-compatible"
+        wm.byok_current_model = config.model
+        wm.byok_current_supports_vision = config.vision
+        key_preview = masked_preview(get_secret("openai_compatible_api_key"))
+        wm.byok_key_preview = key_preview or (
+            "Custom headers" if config.custom_headers else "No key required"
+        )
+        wm.byok_custom_api_key = ""
+        wm.byok_custom_api_key_visible = ""
+    wm.byok_dialog_state = "IDLE"
+    wm.byok_last_error = ""
+    _redraw()
+
+
+class MIXAR_BYOK_OT_custom_toggle_key(Operator):
+    bl_idname = "mixar_byok.custom_toggle_key"
+    bl_label = "Show or hide API key"
+    bl_options = {"INTERNAL"}
+
+    def execute(self, context):
+        wm = context.window_manager
+        if wm.byok_custom_show_key:
+            wm.byok_custom_api_key = wm.byok_custom_api_key_visible
+        else:
+            wm.byok_custom_api_key_visible = wm.byok_custom_api_key
+        wm.byok_custom_show_key = not wm.byok_custom_show_key
+        return {"FINISHED"}
+
+
+class MIXAR_BYOK_OT_custom_test(Operator):
+    bl_idname = "mixar_byok.custom_test"
+    bl_label = "Test connection"
+    bl_options = {"INTERNAL"}
+
+    def execute(self, context):
+        return start_request(context.window_manager, action="test")
+
+
+class MIXAR_BYOK_OT_custom_fetch_models(Operator):
+    bl_idname = "mixar_byok.custom_fetch_models"
+    bl_label = "Fetch model list"
+    bl_options = {"INTERNAL"}
+
+    def execute(self, context):
+        return start_request(context.window_manager, action="models")
+
+
+class MIXAR_BYOK_OT_custom_copy_debug(Operator):
+    bl_idname = "mixar_byok.custom_copy_debug"
+    bl_label = "Copy sanitized debug report"
+    bl_options = {"INTERNAL"}
+
+    def execute(self, context):
+        context.window_manager.clipboard = (
+            context.window_manager.byok_custom_debug_report
+        )
+        self.report({"INFO"}, "Sanitized debug report copied")
+        return {"FINISHED"}
+
+
+class MIXAR_BYOK_OT_custom_view_debug(Operator):
+    bl_idname = "mixar_byok.custom_view_debug"
+    bl_label = "AI Agent Debug"
+    bl_options = {"INTERNAL"}
+
+    def invoke(self, context, _event):
+        return context.window_manager.invoke_props_dialog(self, width=720)
+
+    def draw(self, context):
+        raw = context.window_manager.byok_custom_debug_report
+        try:
+            report = json.loads(raw) if raw else {}
+        except (TypeError, ValueError):
+            report = {"error": "The debug report could not be decoded"}
+        fields = (
+            ("provider", "Provider"),
+            ("route", "Agent route"),
+            ("model", "Model"),
+            ("base_url", "Base URL"),
+            ("endpoint", "Endpoint"),
+            ("context_tokens_approx", "Approx. context tokens"),
+            ("message_count", "Messages"),
+            ("tool_count", "Available tools"),
+            ("request_count", "Provider requests"),
+            ("iterations", "Agent iterations"),
+            ("duration_ms", "Duration (ms)"),
+            ("http_status", "HTTP status"),
+            ("finish_reason", "Finish reason"),
+            ("reasoning_present", "Reasoning preserved"),
+        )
+        col = self.layout.column(align=True)
+        for key, label in fields:
+            row = col.row()
+            row.label(text=label)
+            row.label(text=str(report.get(key, "")))
+        for key, label in (
+            ("capability_warnings", "Capability notices"),
+            ("degraded_parameters", "Capability fallbacks"),
+            ("usage", "Usage"),
+            ("tool_calls", "Tool calls"),
+            ("tool_results", "Tool results"),
+            ("error", "Error"),
+        ):
+            value = report.get(key)
+            if value not in (None, "", [], {}):
+                box = col.box()
+                box.label(text=label)
+                box.label(text=json.dumps(value, ensure_ascii=False)[:1000])
+
+    def execute(self, _context):
+        return {"FINISHED"}
+
+
+classes = (
+    MIXAR_BYOK_OT_custom_toggle_key,
+    MIXAR_BYOK_OT_custom_test,
+    MIXAR_BYOK_OT_custom_fetch_models,
+    MIXAR_BYOK_OT_custom_view_debug,
+    MIXAR_BYOK_OT_custom_copy_debug,
+)

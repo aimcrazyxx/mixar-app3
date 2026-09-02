@@ -139,14 +139,18 @@ def fetch_state(
 def save_credentials(
     provider: str,
     model: str,
-    api_key: str,
     on_done: Callable[[bool, Optional[dict], Optional[str]], None],
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
 ) -> None:
     """PUT /agent/byok — upsert BYOK config. ≤ 15 s."""
     def _thread():
         try:
             response = get_agent_service().save_credentials_all(
-                provider=provider, model=model, api_key=api_key,
+                provider=provider,
+                model=model,
+                api_key=api_key,
+                base_url=base_url,
             )
             success, data, err = _translate(response)
         except Exception as e:
@@ -157,6 +161,42 @@ def save_credentials(
     threading.Thread(
         target=_thread, daemon=True, name="MixarBYOKSave"
     ).start()
+
+
+def save_credentials_now(
+    provider: str,
+    model: str,
+    *,
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
+) -> tuple[bool, Optional[dict], Optional[str]]:
+    """Blocking save helper for callers already running on a worker thread."""
+    try:
+        response = get_agent_service().save_credentials_all(
+            provider=provider,
+            model=model,
+            api_key=api_key,
+            base_url=base_url,
+        )
+        return _translate(response)
+    except Exception as exc:
+        logger.warning("BYOK save_credentials_now failed: %s", exc)
+        return _translate_exception(exc)
+
+
+def delete_credentials_now() -> tuple[bool, int, Optional[str]]:
+    """Blocking delete helper for callers already running on a worker thread."""
+    try:
+        response = get_agent_service().delete_credentials_all()
+        success, data, error = _translate(response)
+        removed = 0
+        if success and isinstance(data, dict) and isinstance(data.get("removed"), int):
+            removed = data["removed"]
+        return success, removed, error
+    except Exception as exc:
+        logger.warning("BYOK delete_credentials_now failed: %s", exc)
+        _, _, error = _translate_exception(exc)
+        return False, 0, error
 
 
 def delete_credentials(

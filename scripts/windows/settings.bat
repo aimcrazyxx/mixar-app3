@@ -24,13 +24,21 @@ if exist "%ROOT_DIR%\.env" (
     )
 )
 
-REM Version always comes from VERSION file (canonical source)
-if not defined MIXAR_VERSION (
-    if exist "%ROOT_DIR%\VERSION" (
-        set /p MIXAR_VERSION=<"%ROOT_DIR%\VERSION"
-    ) else (
-        set "MIXAR_VERSION=0.0.0"
-    )
+REM VERSION is the canonical release version. Deliberately overwrite any
+REM inherited MIXAR_VERSION so stale shell/CI variables cannot make the
+REM runtime config disagree with the compiled binary.
+if exist "%ROOT_DIR%\VERSION" (
+    set /p MIXAR_VERSION=<"%ROOT_DIR%\VERSION"
+) else (
+    echo Error: VERSION file not found at "%ROOT_DIR%\VERSION" 1>&2
+    exit /b 1
+)
+
+REM Keep the patch helper synchronized with VERSION too.
+for /f "tokens=1-3 delims=." %%a in ("%MIXAR_VERSION%") do set "MIXAR_VERSION_PATCH=%%c"
+if not defined MIXAR_VERSION_PATCH (
+    echo Error: Invalid VERSION value: "%MIXAR_VERSION%" 1>&2
+    exit /b 1
 )
 
 REM Core environment settings (env var > .env > default)
@@ -39,7 +47,6 @@ if not defined MIXAR_BACKEND_URL set "MIXAR_BACKEND_URL=https://api.mixar.app"
 if not defined MIXAR_FRONTEND_URL set "MIXAR_FRONTEND_URL=https://www.mixar.app"
 
 REM App info (constants)
-if not defined MIXAR_VERSION_PATCH set "MIXAR_VERSION_PATCH=0"
 if not defined MIXAR_APP_NAME set "MIXAR_APP_NAME=Mixar"
 if not defined MIXAR_EXECUTABLE_NAME set "MIXAR_EXECUTABLE_NAME=mixar"
 if not defined MIXAR_DESCRIPTION set "MIXAR_DESCRIPTION=AI Native 3D Content Creation Software"

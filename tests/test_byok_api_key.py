@@ -33,7 +33,10 @@ if "urllib3.util.retry" not in sys.modules:
 
 import bpy
 
-from mixar.modules.byok.constants import BYOK_API_KEY_MAX_LENGTH
+from mixar.modules.byok.constants import (
+    BYOK_API_KEY_MAX_LENGTH,
+    OPENAI_COMPATIBLE_ROUTE_MIXAR,
+)
 from mixar.modules.byok.core import model_suggestions
 from mixar.modules.byok.ui.operators import byok_ops
 from mixar.modules.byok.ui.properties import byok_props
@@ -54,6 +57,20 @@ def test_byok_api_key_property_allows_long_provider_keys():
     assert api_key_calls
     assert api_key_calls[-1]["maxlen"] == BYOK_API_KEY_MAX_LENGTH
     assert BYOK_API_KEY_MAX_LENGTH == 256
+
+
+def test_openai_compatible_defaults_to_mixar_orchestrator():
+    byok_props.EnumProperty.reset_mock()
+
+    byok_props.register()
+
+    route_calls = [
+        call.kwargs
+        for call in byok_props.EnumProperty.call_args_list
+        if call.kwargs.get("name") == "Agent route"
+    ]
+    assert route_calls
+    assert route_calls[-1]["default"] == OPENAI_COMPATIBLE_ROUTE_MIXAR
 
 
 def test_byok_save_passes_long_api_key_without_truncation(monkeypatch):
