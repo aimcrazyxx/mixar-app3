@@ -131,8 +131,6 @@ jobs:
           p.write_text(s, encoding='utf-8')
 
           resolve('src/scripts/mixar/modules/common/api/services/agent_service.py', ours)
-          # Custom relay must be able to register a local target without ever
-          # sending the user's upstream API key to Mixar's backend.
           p = Path('src/scripts/mixar/modules/common/api/services/agent_service.py')
           s = p.read_text(encoding='utf-8')
           old = "        api_key: Optional[str],\n        base_url: Optional[str] = None,"
@@ -179,28 +177,11 @@ jobs:
               raise RuntimeError('unresolved files remain: ' + remaining)
           PY
 
-      - name: Retarget release metadata and custom Windows build workflow to 3.4.5
+      - name: Retarget release metadata to 3.4.5
         run: |
           python - <<'PY'
           from pathlib import Path
-          # Upstream tag v3.4.5 currently carries VERSION=3.4.4. This custom
-          # release branch is explicitly 3.4.5, so keep its metadata coherent.
           Path('VERSION').write_text('3.4.5\n', encoding='utf-8')
-          p = Path('.github/workflows/build-windows.yml')
-          if p.exists():
-              s = p.read_text(encoding='utf-8')
-              for a, b in (
-                  ('release/v3.3.5', 'release/v3.4.5'),
-                  ('mixar-app3-release-v3.3.5-windows', 'mixar-app3-release-v3.4.5-windows'),
-                  ('3.3.5-codex-preview', '3.4.5-codex-preview'),
-                  ("if ($version -ne '3.3.5')", "if ($version -ne '3.4.5')"),
-                  ('VERSION must be 3.3.5 for release/v3.3.5', 'VERSION must be 3.4.5 for release/v3.4.5'),
-                  ('expected 3.3.5', 'expected 3.4.5'),
-                  ("-ne '3.3.5'", "-ne '3.4.5'"),
-                  ('Mixar 3.3.5 preview', 'Mixar 3.4.5 preview'),
-              ):
-                  s = s.replace(a, b)
-              p.write_text(s, encoding='utf-8')
           PY
           git add -A
 
@@ -229,6 +210,10 @@ jobs:
 
       - name: Commit ported changes
         run: |
+          # GitHub Actions' token cannot create workflow files without the
+          # workflows scope. Publish code first; the workflow is added via
+          # the authenticated GitHub connector immediately afterwards.
+          git rm -f .github/workflows/build-windows.yml || true
           git add -A
           git commit -m "feat: port custom integrations to Mixar 3.4.5"
 
