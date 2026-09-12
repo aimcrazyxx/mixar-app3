@@ -131,6 +131,17 @@ jobs:
           p.write_text(s, encoding='utf-8')
 
           resolve('src/scripts/mixar/modules/common/api/services/agent_service.py', ours)
+          # Custom relay must be able to register a local target without ever
+          # sending the user's upstream API key to Mixar's backend.
+          p = Path('src/scripts/mixar/modules/common/api/services/agent_service.py')
+          s = p.read_text(encoding='utf-8')
+          old = "        api_key: Optional[str],\n        base_url: Optional[str] = None,"
+          new = "        api_key: Optional[str] = None,\n        base_url: Optional[str] = None,"
+          if old not in s:
+              raise RuntimeError('AgentService save_credentials_all signature anchor changed')
+          s = s.replace(old, new, 1)
+          p.write_text(s, encoding='utf-8')
+
           resolve('src/scripts/mixar/modules/space_mixie_chat/constants.py', ours)
           resolve('src/scripts/mixar/modules/space_mixie_chat/core/jsonrpc_client.py', ours)
           resolve('src/scripts/mixar/modules/space_mixie_chat/core/sse_handler.py', ours)
