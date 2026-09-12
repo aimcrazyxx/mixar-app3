@@ -38,21 +38,163 @@ jobs:
           echo "Patch size: $(wc -c < "$RUNNER_TEMP/mixar-custom.patch") bytes"
 
       - name: Create 3.4.5 branch from official tag
-        run: |
-          git checkout -B release/v3.4.5 upstream-v3.4.5
+        run: git checkout -B release/v3.4.5 upstream-v3.4.5
 
-      - name: Apply all custom changes with 3-way merge
+      - name: Apply custom patch
+        shell: bash
         run: |
-          if ! git apply --3way --index "$RUNNER_TEMP/mixar-custom.patch"; then
-            echo "::error::Automatic 3-way patch application found conflicts."
-            git status --short
-            echo "===== CONFLICT DIFFS ====="
-            while IFS= read -r f; do
-              echo "===== $f ====="
-              git diff --cc -- "$f" || true
-            done < <(git diff --name-only --diff-filter=U)
-            exit 1
+          set +e
+          git apply --3way --index "$RUNNER_TEMP/mixar-custom.patch"
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo "3-way application produced expected 3.4.5 overlap; resolving semantic conflicts."
           fi
+
+      - name: Resolve 3.4.5 semantic conflicts
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+
+          def resolve(path, choose):
+              p = Path(path)
+              text = p.read_text(encoding='utf-8')
+              out = []
+              pos = 0
+              while True:
+                  start = text.find('<<<<<<< ours\n', pos)
+                  if start < 0:
+                      out.append(text[pos:])
+                      break
+                  out.append(text[pos:start])
+                  mid = text.find('=======\n', start)
+                  end = text.find('>>>>>>> theirs\n', mid)
+                  if mid < 0 or end < 0:
+                      raise RuntimeError(f'broken conflict markers in {path}')
+                  ours = text[start + len('<<<<<<< ours\n'):mid]
+                  theirs = text[mid + len('=======\n'):end]
+                  out.append(choose(ours, theirs))
+                  pos = end + len('>>>>>>> theirs\n')
+              merged = ''.join(out)
+              if '<<<<<<< ' in merged or '>>>>>>> ' in merged or '\n=======\n' in merged:
+                  raise RuntimeError(f'unresolved conflict marker in {path}')
+              p.write_text(merged, encoding='utf-8')
+
+          def ours(o, t): return o
+          def both(o, t): return o + t
+
+          # Documentation follows 3.4.5; runtime custom contracts are covered by code/tests.
+          resolve('CLAUDE.md', ours)
+
+          # 3.4.5 Local provider + user's OpenAI-compatible provider are parallel features.
+          resolve('src/scripts/mixar/modules/byok/constants.py', both)
+
+          # Keep the newer 3.4.5 async API signature/supports_vision. The user's blocking
+          # save/delete helpers applied outside these conflict hunks and remain present.
+          resolve('src/scripts/mixar/modules/byok/core/byok_client.py', ours)
+
+          # Preserve both provider predicates and both entries in the provider list.
+          resolve('src/scripts/mixar/modules/byok/core/model_suggestions.py', both)
+
+          def byok_ops_choice(o, t):
+              if 'byok_form_local_custom_key' in o and 'byok_custom_api_key' in t:
+                  return o + t
+              if 'model_suggestions.is_local(wm.byok_current_provider)' in o:
+                  return o + t
+              if 'byok_dialog_ui.draw_dialog' in o:
+                  return o
+              if 'In-flight guard only' in o:
+                  return o
+              if 'wm.byok_dialog_state = \'REMOVING\'' in o and 'is_openai_compatible' in t:
+                  return '''        if model_suggestions.is_openai_compatible(wm.byok_current_provider):\n            from ...constants import OPENAI_COMPATIBLE_ROUTE_MIXAR\n\n            wm.byok_dialog_state = 'REMOVING'\n            wm.byok_last_error = ''\n            _redraw_mixie_chat_areas()\n            if wm.byok_custom_active_route == OPENAI_COMPATIBLE_ROUTE_MIXAR:\n                byok_client.delete_credentials(on_done=_on_custom_relay_delete_done)\n                return {'FINISHED'}\n\n            _clear_custom_local_state(wm)\n            wm.byok_dialog_state = 'REMOVED'\n            _redraw_mixie_chat_areas()\n            byok_client.fetch_state(on_done=_on_fetch_done)\n            return {'FINISHED'}\n        wm.byok_dialog_state = 'REMOVING'\n'''
+              # Fetch/catalog operators moved to byok_state_ops in 3.4.5.
+              if 'MIXAR_BYOK_OT_fetch_state' in t or 'Fetch BYOK state' in t:
+                  return o
+              return o
+
+          resolve('src/scripts/mixar/modules/byok/ui/operators/byok_ops.py', byok_ops_choice)
+
+          def props_choice(o, t):
+              # Import block is rebuilt below from the 3.4.5 side.
+              if 'LOCAL_MODE_ITEMS' in o and 'OPENAI_COMPATIBLE_DEFAULT_BASE_URL' in t:
+                  return o
+              # Local-provider callbacks and custom-provider callbacks can coexist.
+              if 'def _local_model_items' in o and 'def _custom_model_items' in t:
+                  return o + t
+              if 'byok_form_local_custom_key' in o and 'byok_custom_api_key' in t:
+                  return o + t
+              return o
+
+          resolve('src/scripts/mixar/modules/byok/ui/properties/byok_props.py', props_choice)
+
+          p = Path('src/scripts/mixar/modules/byok/ui/properties/byok_props.py')
+          s = p.read_text(encoding='utf-8')
+          needle = "    LOCAL_MODE_ITEMS,\n    OPENROUTER_DEFAULT_MODEL,\n)"
+          repl = "    LOCAL_MODE_ITEMS,\n    OPENAI_COMPATIBLE_DEFAULT_BASE_URL,\n    OPENAI_COMPATIBLE_DEFAULT_MODEL,\n    OPENAI_COMPATIBLE_ROUTE_DIRECT,\n    OPENAI_COMPATIBLE_ROUTE_MIXAR,\n    OPENROUTER_DEFAULT_MODEL,\n)"
+          if needle not in s:
+              raise RuntimeError('BYOK props constants import anchor changed')
+          s = s.replace(needle, repl, 1)
+          anchor = "from ...core.model_suggestions import (\n"
+          if anchor not in s:
+              raise RuntimeError('BYOK props model_suggestions import anchor changed')
+          s = s.replace(anchor, "from ...core import custom_model_cache\n" + anchor, 1)
+          p.write_text(s, encoding='utf-8')
+
+          # 3.4.5 already generalized the backend save payload for Local relay;
+          # that is a superset of the user's relay transport.
+          resolve('src/scripts/mixar/modules/common/api/services/agent_service.py', ours)
+
+          # 3.4.5 already owns llm.request and its new add-on-project/liveness routes.
+          resolve('src/scripts/mixar/modules/space_mixie_chat/constants.py', ours)
+          resolve('src/scripts/mixar/modules/space_mixie_chat/core/jsonrpc_client.py', ours)
+
+          # Keep 3.4.5 interrupt answers/interrupt_id and its dynamic current WS instance id.
+          resolve('src/scripts/mixar/modules/space_mixie_chat/core/sse_handler.py', ours)
+
+          # Keep newer attachment compression/error isolation. User direct-agent routing
+          # was applied in non-conflicting hunks and remains intact.
+          resolve('src/scripts/mixar/modules/space_mixie_chat/ui/operators/chat_ops.py', ours)
+
+          # Wire the custom provider into the new 3.4.5 card-style BYOK dialog.
+          p = Path('src/scripts/mixar/modules/byok/ui/operators/byok_dialog_ui.py')
+          s = p.read_text(encoding='utf-8')
+          branch = "    if model_suggestions.is_openrouter(wm.byok_form_provider):\n        _draw_openrouter_fields(body, wm)\n"
+          custom_branch = "    if model_suggestions.is_openai_compatible(wm.byok_form_provider):\n        _draw_openai_compatible_fields(box, body, wm)\n    elif model_suggestions.is_openrouter(wm.byok_form_provider):\n        _draw_openrouter_fields(body, wm)\n"
+          if branch not in s:
+              raise RuntimeError('BYOK dialog provider branch anchor changed')
+          s = s.replace(branch, custom_branch, 1)
+          helper_anchor = "\ndef _draw_cloud_fields(body, wm):\n"
+          helper = '''\ndef _draw_openai_compatible_fields(box, body, wm):\n    from ..components.openai_compatible_draw import draw\n\n    def _draw_tall_prop(layout, data, prop, label):\n        field_label(layout, label)\n        field_input(layout, data, prop)\n        layout.separator(factor=0.45)\n\n    draw(box, body, wm, _draw_tall_prop)\n\n\n'''
+          if helper_anchor not in s:
+              raise RuntimeError('BYOK dialog helper anchor changed')
+          s = s.replace(helper_anchor, helper + "def _draw_cloud_fields(body, wm):\n", 1)
+          p.write_text(s, encoding='utf-8')
+
+          # Do not let a server refresh relabel an active secure custom relay as the
+          # backend implementation provider ('local').
+          p = Path('src/scripts/mixar/modules/byok/ui/operators/byok_state_ops.py')
+          s = p.read_text(encoding='utf-8')
+          anchor = "        wm = bpy.context.window_manager\n        if success:\n"
+          guard = "        wm = bpy.context.window_manager\n        if (\n            getattr(wm, 'byok_custom_enabled', False)\n            and model_suggestions.is_openai_compatible(\n                getattr(wm, 'byok_current_provider', '')\n            )\n        ):\n            return\n        if success:\n"
+          if anchor not in s:
+              raise RuntimeError('BYOK state callback anchor changed')
+          s = s.replace(anchor, guard, 1)
+          p.write_text(s, encoding='utf-8')
+
+          unresolved = subprocess.check_output(
+              ['git', 'diff', '--name-only', '--diff-filter=U'], text=True
+          ).strip()
+          # Files still have unmerged index stages until explicitly added.
+          if unresolved:
+              subprocess.run(['git', 'add', '--'] + unresolved.splitlines(), check=True)
+          subprocess.run(['git', 'add', '-A'], check=True)
+          remaining = subprocess.check_output(
+              ['git', 'diff', '--name-only', '--diff-filter=U'], text=True
+          ).strip()
+          if remaining:
+              raise RuntimeError('unresolved files remain: ' + remaining)
+          PY
 
       - name: Retarget custom Windows build workflow to 3.4.5
         run: |
@@ -61,34 +203,47 @@ jobs:
           p = Path('.github/workflows/build-windows.yml')
           if p.exists():
               s = p.read_text(encoding='utf-8')
-              s = s.replace('release/v3.3.5', 'release/v3.4.5')
-              s = s.replace('mixar-app3-release-v3.3.5-windows', 'mixar-app3-release-v3.4.5-windows')
-              s = s.replace('3.3.5-codex-preview', '3.4.5-codex-preview')
-              s = s.replace("VERSION must be 3.3.5 for release/v3.3.5", "VERSION must be 3.4.5 for release/v3.4.5")
-              s = s.replace("if ($version -ne '3.3.5')", "if ($version -ne '3.4.5')")
-              s = s.replace("expected 3.3.5", "expected 3.4.5")
-              s = s.replace("-ne '3.3.5'", "-ne '3.4.5'")
-              s = s.replace('Mixar 3.3.5 preview', 'Mixar 3.4.5 preview')
+              for a, b in (
+                  ('release/v3.3.5', 'release/v3.4.5'),
+                  ('mixar-app3-release-v3.3.5-windows', 'mixar-app3-release-v3.4.5-windows'),
+                  ('3.3.5-codex-preview', '3.4.5-codex-preview'),
+                  ("if ($version -ne '3.3.5')", "if ($version -ne '3.4.5')"),
+                  ('VERSION must be 3.3.5 for release/v3.3.5', 'VERSION must be 3.4.5 for release/v3.4.5'),
+                  ('expected 3.3.5', 'expected 3.4.5'),
+                  ("-ne '3.3.5'", "-ne '3.4.5'"),
+                  ('Mixar 3.3.5 preview', 'Mixar 3.4.5 preview'),
+              ):
+                  s = s.replace(a, b)
               p.write_text(s, encoding='utf-8')
           PY
           git add -A
 
-      - name: Validate version and Python syntax
+      - name: Validate port
         run: |
           test "$(tr -d '\r\n' < VERSION)" = "3.4.5"
+          ! grep -R -n -E '^(<<<<<<<|=======|>>>>>>>)' \
+            src/scripts/mixar/modules/byok \
+            src/scripts/mixar/modules/space_mixie_chat \
+            src/scripts/mixar/modules/common/api/services/agent_service.py
           python -m compileall -q \
             src/scripts/mixar/modules/byok \
             src/scripts/mixar/modules/moodboard \
-            src/scripts/mixar/modules/common/generation_params
+            src/scripts/mixar/modules/common/generation_params \
+            src/scripts/mixar/modules/space_mixie_chat
+          python -m pytest -q \
+            tests/moodboard/test_catalog_model_resolution.py \
+            tests/moodboard/test_turnaround_views.py \
+            tests/moodboard/test_tripo_client.py \
+            tests/moodboard/test_tripo_p1_client.py \
+            tests/moodboard/test_tripo_p1_job.py \
+            tests/test_byok_api_key.py \
+            tests/test_openai_compatible_agent.py \
+            tests/test_openai_compatible_relay.py
 
       - name: Commit ported changes
         run: |
-          if git diff --cached --quiet; then
-            echo "::error::No custom changes were applied."
-            exit 1
-          fi
+          git add -A
           git commit -m "feat: port custom integrations to Mixar 3.4.5"
 
       - name: Push release/v3.4.5
-        run: |
-          git push --force-with-lease origin release/v3.4.5
+        run: git push --force-with-lease origin release/v3.4.5
