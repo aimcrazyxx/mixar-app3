@@ -84,17 +84,9 @@ jobs:
           def ours(o, t): return o
           def both(o, t): return o + t
 
-          # Documentation follows 3.4.5; runtime custom contracts are covered by code/tests.
           resolve('CLAUDE.md', ours)
-
-          # 3.4.5 Local provider + user's OpenAI-compatible provider are parallel features.
           resolve('src/scripts/mixar/modules/byok/constants.py', both)
-
-          # Keep the newer 3.4.5 async API signature/supports_vision. The user's blocking
-          # save/delete helpers applied outside these conflict hunks and remain present.
           resolve('src/scripts/mixar/modules/byok/core/byok_client.py', ours)
-
-          # Preserve both provider predicates and both entries in the provider list.
           resolve('src/scripts/mixar/modules/byok/core/model_suggestions.py', both)
 
           def byok_ops_choice(o, t):
@@ -108,7 +100,6 @@ jobs:
                   return o
               if 'wm.byok_dialog_state = \'REMOVING\'' in o and 'is_openai_compatible' in t:
                   return '''        if model_suggestions.is_openai_compatible(wm.byok_current_provider):\n            from ...constants import OPENAI_COMPATIBLE_ROUTE_MIXAR\n\n            wm.byok_dialog_state = 'REMOVING'\n            wm.byok_last_error = ''\n            _redraw_mixie_chat_areas()\n            if wm.byok_custom_active_route == OPENAI_COMPATIBLE_ROUTE_MIXAR:\n                byok_client.delete_credentials(on_done=_on_custom_relay_delete_done)\n                return {'FINISHED'}\n\n            _clear_custom_local_state(wm)\n            wm.byok_dialog_state = 'REMOVED'\n            _redraw_mixie_chat_areas()\n            byok_client.fetch_state(on_done=_on_fetch_done)\n            return {'FINISHED'}\n        wm.byok_dialog_state = 'REMOVING'\n'''
-              # Fetch/catalog operators moved to byok_state_ops in 3.4.5.
               if 'MIXAR_BYOK_OT_fetch_state' in t or 'Fetch BYOK state' in t:
                   return o
               return o
@@ -116,10 +107,8 @@ jobs:
           resolve('src/scripts/mixar/modules/byok/ui/operators/byok_ops.py', byok_ops_choice)
 
           def props_choice(o, t):
-              # Import block is rebuilt below from the 3.4.5 side.
               if 'LOCAL_MODE_ITEMS' in o and 'OPENAI_COMPATIBLE_DEFAULT_BASE_URL' in t:
                   return o
-              # Local-provider callbacks and custom-provider callbacks can coexist.
               if 'def _local_model_items' in o and 'def _custom_model_items' in t:
                   return o + t
               if 'byok_form_local_custom_key' in o and 'byok_custom_api_key' in t:
@@ -141,22 +130,12 @@ jobs:
           s = s.replace(anchor, "from ...core import custom_model_cache\n" + anchor, 1)
           p.write_text(s, encoding='utf-8')
 
-          # 3.4.5 already generalized the backend save payload for Local relay;
-          # that is a superset of the user's relay transport.
           resolve('src/scripts/mixar/modules/common/api/services/agent_service.py', ours)
-
-          # 3.4.5 already owns llm.request and its new add-on-project/liveness routes.
           resolve('src/scripts/mixar/modules/space_mixie_chat/constants.py', ours)
           resolve('src/scripts/mixar/modules/space_mixie_chat/core/jsonrpc_client.py', ours)
-
-          # Keep 3.4.5 interrupt answers/interrupt_id and its dynamic current WS instance id.
           resolve('src/scripts/mixar/modules/space_mixie_chat/core/sse_handler.py', ours)
-
-          # Keep newer attachment compression/error isolation. User direct-agent routing
-          # was applied in non-conflicting hunks and remains intact.
           resolve('src/scripts/mixar/modules/space_mixie_chat/ui/operators/chat_ops.py', ours)
 
-          # Wire the custom provider into the new 3.4.5 card-style BYOK dialog.
           p = Path('src/scripts/mixar/modules/byok/ui/operators/byok_dialog_ui.py')
           s = p.read_text(encoding='utf-8')
           branch = "    if model_suggestions.is_openrouter(wm.byok_form_provider):\n        _draw_openrouter_fields(body, wm)\n"
@@ -171,8 +150,6 @@ jobs:
           s = s.replace(helper_anchor, helper + "def _draw_cloud_fields(body, wm):\n", 1)
           p.write_text(s, encoding='utf-8')
 
-          # Do not let a server refresh relabel an active secure custom relay as the
-          # backend implementation provider ('local').
           p = Path('src/scripts/mixar/modules/byok/ui/operators/byok_state_ops.py')
           s = p.read_text(encoding='utf-8')
           anchor = "        wm = bpy.context.window_manager\n        if success:\n"
@@ -182,24 +159,22 @@ jobs:
           s = s.replace(anchor, guard, 1)
           p.write_text(s, encoding='utf-8')
 
-          unresolved = subprocess.check_output(
-              ['git', 'diff', '--name-only', '--diff-filter=U'], text=True
-          ).strip()
-          # Files still have unmerged index stages until explicitly added.
+          unresolved = subprocess.check_output(['git', 'diff', '--name-only', '--diff-filter=U'], text=True).strip()
           if unresolved:
               subprocess.run(['git', 'add', '--'] + unresolved.splitlines(), check=True)
           subprocess.run(['git', 'add', '-A'], check=True)
-          remaining = subprocess.check_output(
-              ['git', 'diff', '--name-only', '--diff-filter=U'], text=True
-          ).strip()
+          remaining = subprocess.check_output(['git', 'diff', '--name-only', '--diff-filter=U'], text=True).strip()
           if remaining:
               raise RuntimeError('unresolved files remain: ' + remaining)
           PY
 
-      - name: Retarget custom Windows build workflow to 3.4.5
+      - name: Retarget release metadata and custom Windows build workflow to 3.4.5
         run: |
           python - <<'PY'
           from pathlib import Path
+          # Upstream tag v3.4.5 currently carries VERSION=3.4.4. This custom
+          # release branch is explicitly 3.4.5, so keep its metadata coherent.
+          Path('VERSION').write_text('3.4.5\n', encoding='utf-8')
           p = Path('.github/workflows/build-windows.yml')
           if p.exists():
               s = p.read_text(encoding='utf-8')
