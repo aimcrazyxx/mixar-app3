@@ -1,0 +1,89 @@
+name: Port custom Mixar changes to 3.4.5
+
+on:
+  push:
+    branches:
+      - migration/v3.4.5-bootstrap
+    paths:
+      - '.github/workflows/port-customizations-to-3.4.5.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  port:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch custom 3.3.5 branch and official Mixar 3.4.5
+        run: |
+          git fetch origin release/v3.3.5
+          git remote add upstream https://github.com/Mixar-AI/mixar-app.git || true
+          git fetch upstream refs/tags/v3.4.5:refs/tags/upstream-v3.4.5
+
+      - name: Build cumulative custom patch
+        run: |
+          git diff --binary 4d069a7e4fade170f5b63c98d6210f1a6d9b226e 7a29cc901a8745495254d2916b0c0120905fe05b > "$RUNNER_TEMP/mixar-custom.patch"
+          test -s "$RUNNER_TEMP/mixar-custom.patch"
+          echo "Patch size: $(wc -c < "$RUNNER_TEMP/mixar-custom.patch") bytes"
+
+      - name: Create 3.4.5 branch from official tag
+        run: |
+          git checkout -B release/v3.4.5 upstream-v3.4.5
+
+      - name: Apply all custom changes with 3-way merge
+        run: |
+          if ! git apply --3way --index "$RUNNER_TEMP/mixar-custom.patch"; then
+            echo "::error::Automatic 3-way patch application found conflicts."
+            git status --short
+            exit 1
+          fi
+
+      - name: Retarget custom Windows build workflow to 3.4.5
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('.github/workflows/build-windows.yml')
+          if p.exists():
+              s = p.read_text(encoding='utf-8')
+              s = s.replace('release/v3.3.5', 'release/v3.4.5')
+              s = s.replace('mixar-app3-release-v3.3.5-windows', 'mixar-app3-release-v3.4.5-windows')
+              s = s.replace('3.3.5-codex-preview', '3.4.5-codex-preview')
+              s = s.replace("VERSION must be 3.3.5 for release/v3.3.5", "VERSION must be 3.4.5 for release/v3.4.5")
+              s = s.replace("if ($version -ne '3.3.5')", "if ($version -ne '3.4.5')")
+              s = s.replace("expected 3.3.5", "expected 3.4.5")
+              s = s.replace("-ne '3.3.5'", "-ne '3.4.5'")
+              s = s.replace('Mixar 3.3.5 preview', 'Mixar 3.4.5 preview')
+              p.write_text(s, encoding='utf-8')
+          PY
+          git add -A
+
+      - name: Validate version and Python syntax
+        run: |
+          test "$(tr -d '\r\n' < VERSION)" = "3.4.5"
+          python -m compileall -q \
+            src/scripts/mixar/modules/byok \
+            src/scripts/mixar/modules/moodboard \
+            src/scripts/mixar/modules/common/generation_params
+
+      - name: Commit ported changes
+        run: |
+          if git diff --cached --quiet; then
+            echo "::error::No custom changes were applied."
+            exit 1
+          fi
+          git commit -m "feat: port custom integrations to Mixar 3.4.5"
+
+      - name: Push release/v3.4.5
+        run: |
+          git push --force-with-lease origin release/v3.4.5
