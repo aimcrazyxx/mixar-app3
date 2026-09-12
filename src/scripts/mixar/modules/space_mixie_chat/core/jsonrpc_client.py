@@ -849,6 +849,43 @@ class JSONRPCWebSocketClient:
                 "jsonrpc": "2.0", "id": request_id, "result": result,
             }))
 
+    def _handle_llm_request(self, params: dict, request_id: Optional[str]) -> None:
+        """Run an approved provider request without blocking the WS loop."""
+        if not request_id:
+            return
+
+        def _worker() -> None:
+            try:
+                from mixar.modules.byok.core.openai_compatible_relay import (
+                    handle_llm_request,
+                )
+
+                result = handle_llm_request(params)
+            except Exception as exc:  # noqa: BLE001 - RPC must always answer
+                logger.error(
+                    "OpenAI-compatible relay worker failed: %s",
+                    type(exc).__name__,
+                    exc_info=True,
+                )
+                result = {
+                    "status_code": 500,
+                    "headers": {"content-type": "application/json"},
+                    "body": json.dumps(
+                        {"error": {"message": "The provider relay failed."}}
+                    ),
+                }
+            self._outbound.put(
+                json.dumps(
+                    {"jsonrpc": "2.0", "id": request_id, "result": result}
+                )
+            )
+
+        threading.Thread(
+            target=_worker,
+            daemon=True,
+            name="MixarOpenAICompatibleRelay",
+        ).start()
+
     def _send_ping(self) -> None:
         """Send ping request."""
         request_id = f"ping_{self._next_request_id()}"

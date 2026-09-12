@@ -93,7 +93,7 @@ class AgentService(BaseService):
         self,
         provider: str,
         model: str,
-        api_key: Optional[str],
+        api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         supports_vision: Optional[bool] = None,
     ) -> APIResponse:
@@ -103,14 +103,15 @@ class AgentService(BaseService):
         provider/model/key out to the default + per-agent roles and returns
         the same {items, byok_active} shape as GET /agent/credentials.
 
-        Server validates the key with the provider (200ms–15s) before storing.
+        Cloud providers send ``api_key``. The device-relay provider sends its
+        approved ``base_url`` and keeps the real credential on the device.
         Atomic: on any failure, previous state (if any) is preserved.
 
         ``base_url`` / ``supports_vision`` are only included when provided
         (used by the "local" provider to register the relay target) —
         omitting them keeps the payload byte-identical for older backends.
         """
-        payload = {
+        payload: Dict[str, Any] = {
             "provider": provider,
             "model": model,
         }

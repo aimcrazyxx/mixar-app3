@@ -95,6 +95,13 @@ def _on_fetch_done(success: bool, data, err):
     """
     try:
         wm = bpy.context.window_manager
+        if (
+            getattr(wm, 'byok_custom_enabled', False)
+            and model_suggestions.is_openai_compatible(
+                getattr(wm, 'byok_current_provider', '')
+            )
+        ):
+            return
         if success:
             _apply_cached_state(wm, data or {})
             logger.debug(

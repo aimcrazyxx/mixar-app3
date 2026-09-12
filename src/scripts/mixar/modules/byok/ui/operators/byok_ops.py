@@ -25,7 +25,6 @@ import os
 
 import bpy
 from bpy.types import Operator
-
 from mixar.config.logging_config import get_logger
 
 from ...core import byok_client, model_suggestions
@@ -50,11 +49,29 @@ def _wipe_form_secrets(wm):
         'byok_form_api_key',
         'byok_form_codex_bundle',
         'byok_form_local_custom_key',
+        'byok_form_api_key', 'byok_form_codex_bundle',
+        'byok_custom_api_key', 'byok_custom_api_key_visible',
     ):
         try:
             setattr(wm, attr, '')
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(
+                "Could not wipe transient BYOK field %s: %s",
+                attr,
+                type(exc).__name__,
+            )
+
+
+def _clear_custom_local_state(wm):
+    """Remove the local compatible-provider trust anchor and UI override."""
+    from mixar.modules.common.secure_storage import delete_secret
+
+    delete_secret('openai_compatible_api_key')
+    delete_secret('openai_compatible_config')
+    wm.byok_custom_enabled = False
+    wm.byok_custom_active_route = ''
+    _clear_cached_state(wm)
+    _wipe_form_secrets(wm)
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +113,15 @@ class MIXAR_BYOK_OT_open_dialog(Operator):
                     wm.byok_form_openrouter_model = wm.byok_current_model
             elif model_suggestions.is_local(wm.byok_current_provider):
                 pass  # prefilled below by byok_local_ops.prepare_dialog
+            elif model_suggestions.is_codex(wm.byok_current_provider):
+                # Codex uses a free-text model slug, not the catalog dropdown.
+                if wm.byok_current_model:
+                    wm.byok_form_codex_model = wm.byok_current_model
+            elif model_suggestions.is_openai_compatible(wm.byok_current_provider):
+                if wm.byok_custom_active_route:
+                    wm.byok_custom_route = wm.byok_custom_active_route
+                if wm.byok_current_model:
+                    wm.byok_custom_model = wm.byok_current_model
             elif wm.byok_current_model:
                 try:
                     wm.byok_form_model = wm.byok_current_model
@@ -163,6 +189,9 @@ class MIXAR_BYOK_OT_save(Operator):
             return {'CANCELLED'}
         provider = wm.byok_form_provider
 
+        if model_suggestions.is_openai_compatible(provider):
+            from .openai_compatible_ops import start_request
+            return start_request(wm, action='save')
         if model_suggestions.is_openrouter(provider):
             return self._execute_openrouter(wm)
         if model_suggestions.is_codex(provider):
@@ -274,6 +303,11 @@ def _on_save_done(success: bool, data, err):
     try:
         wm = bpy.context.window_manager
         if success:
+            from mixar.modules.common.secure_storage import delete_secret
+            wm.byok_custom_enabled = False
+            wm.byok_custom_active_route = ''
+            delete_secret('openai_compatible_api_key')
+            delete_secret('openai_compatible_config')
             _apply_cached_state(wm, data or {})
             _wipe_form_secrets(wm)
             # SAVED, not IDLE: the dialog shows an explicit recap with a
@@ -311,7 +345,7 @@ class MIXAR_BYOK_OT_codex_load_file(Operator):
         try:
             with open(path, "r", encoding="utf-8") as f:
                 content = f.read().strip()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("Codex auth.json read failed: %s", e)
             self.report({'ERROR'}, "Could not read ~/.codex/auth.json")
             return {'CANCELLED'}
@@ -396,12 +430,43 @@ class MIXAR_BYOK_OT_confirm_remove(Operator):
 
     def execute(self, context):
         wm = context.window_manager
+        if model_suggestions.is_openai_compatible(wm.byok_current_provider):
+            from ...constants import OPENAI_COMPATIBLE_ROUTE_MIXAR
+
+            wm.byok_dialog_state = 'REMOVING'
+            wm.byok_last_error = ''
+            _redraw_mixie_chat_areas()
+            if wm.byok_custom_active_route == OPENAI_COMPATIBLE_ROUTE_MIXAR:
+                byok_client.delete_credentials(on_done=_on_custom_relay_delete_done)
+                return {'FINISHED'}
+
+            _clear_custom_local_state(wm)
+            wm.byok_dialog_state = 'REMOVED'
+            _redraw_mixie_chat_areas()
+            byok_client.fetch_state(on_done=_on_fetch_done)
+            return {'FINISHED'}
         wm.byok_dialog_state = 'REMOVING'
         wm.byok_last_error = ''
         _redraw_mixie_chat_areas()
 
         byok_client.delete_credentials(on_done=_on_delete_done)
         return {'FINISHED'}
+
+
+def _on_custom_relay_delete_done(success: bool, _removed_count: int, err):
+    """Delete local relay approval only after backend unregister succeeds."""
+    try:
+        wm = bpy.context.window_manager
+        if success:
+            _clear_custom_local_state(wm)
+            wm.byok_dialog_state = 'IDLE'
+            wm.byok_last_error = ''
+        else:
+            wm.byok_dialog_state = 'ERROR'
+            wm.byok_last_error = err or "Could not unregister the Mixar relay."
+        _redraw_mixie_chat_areas()
+    except Exception as exc:
+        logger.error("Custom relay delete callback failed: %s", exc, exc_info=True)
 
 
 def _on_delete_done(success: bool, removed_count: int, err):

@@ -333,12 +333,10 @@ def _next_strip_slot(scene, group_id: str):
 def model_accepts_multi_view(service_key: str, model_slug: str) -> bool:
     """True when *model_slug* can take multi-view input.
 
-    Reads the catalog's per-model ``supports_multi_view`` flag, which is the
-    only source of truth — a hardcoded slug list used to back this up, but it
-    listed the Tencent slugs and not the fal one that is actually enabled, so
-    it hid the affordance for the one model that could use it. Before the
-    catalog loads (offline / pre-auth) nothing is offered, which is correct:
-    the job could not be submitted then either.
+    Reads the catalog's per-model capability.  Tripo 3.1/P1 additionally use a
+    narrow client override because their official multi-view wire contract is
+    implemented locally and older deployed catalog rows can lack the flag.
+    Unknown models still fail closed.
     """
     try:
         from mixar.modules.common.generation_params import (

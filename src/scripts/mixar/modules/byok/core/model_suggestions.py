@@ -39,6 +39,8 @@ from ..constants import (
     LOCAL_PROVIDER_ID,
     LOCAL_PROVIDER_ITEM,
     MODEL_EMPTY_SENTINEL,
+    OPENAI_COMPATIBLE_PROVIDER_ID,
+    OPENAI_COMPATIBLE_PROVIDER_ITEM,
     OPENROUTER_PROVIDER_ID,
     OPENROUTER_PROVIDER_ITEM,
     PROVIDER_EMPTY_SENTINEL,
@@ -74,6 +76,9 @@ def is_codex(provider: str) -> bool:
 def is_local(provider: str) -> bool:
     """True when ``provider`` is the client-side Local (this computer) option."""
     return provider == LOCAL_PROVIDER_ID
+def is_openai_compatible(provider: str) -> bool:
+    """True for the direct custom OpenAI-compatible provider."""
+    return provider == OPENAI_COMPATIBLE_PROVIDER_ID
 
 
 def get_provider_items() -> list[tuple[str, str, str]]:
@@ -95,6 +100,9 @@ def get_provider_items() -> list[tuple[str, str, str]]:
     identifiers = {item[0] for item in items}
     for client_item in (
         OPENROUTER_PROVIDER_ITEM, CODEX_PROVIDER_ITEM, LOCAL_PROVIDER_ITEM,
+        OPENROUTER_PROVIDER_ITEM,
+        CODEX_PROVIDER_ITEM,
+        OPENAI_COMPATIBLE_PROVIDER_ITEM,
     ):
         if client_item[0] not in identifiers:
             items.append(client_item)

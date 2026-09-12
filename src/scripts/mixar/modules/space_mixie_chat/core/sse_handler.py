@@ -429,6 +429,7 @@ class SSEStreamHandler:
         answers: Optional[dict[str, str]] = None,
         interrupt_id: Optional[str] = None,
         auth_token: Optional[str] = None,
+        instance_id: str = "",
     ) -> bool:
         """
         Start SSE stream for input request (unified interrupt response).
@@ -440,6 +441,7 @@ class SSEStreamHandler:
             answers: Complete answer map for a batched choice interrupt
             interrupt_id: Checkpointed interrupt to resume
             auth_token: Optional auth token for request
+            instance_id: WebSocket connection that owns relay RPCs for this turn
 
         Returns:
             True if stream started successfully
@@ -477,6 +479,7 @@ class SSEStreamHandler:
         answers: Optional[dict[str, str]],
         interrupt_id: Optional[str],
         auth_token: Optional[str],
+        instance_id: str = "",
         _connect_attempt: int = 0,
     ) -> None:
         """Background thread that handles input SSE streaming."""
@@ -586,6 +589,7 @@ class SSEStreamHandler:
                     answers,
                     interrupt_id,
                     auth_token,
+                    instance_id,
                     _connect_attempt + 1,
                 )
             self._on_error(f"Connection error: {e}")

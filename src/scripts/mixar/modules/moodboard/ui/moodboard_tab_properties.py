@@ -12,19 +12,17 @@ and the parent sidebar container.
 """
 
 import bpy
-from bpy.types import PropertyGroup
 from bpy.props import (
-    PointerProperty,
-    CollectionProperty,
-    IntProperty,
     BoolProperty,
-    StringProperty,
+    CollectionProperty,
     EnumProperty,
+    IntProperty,
+    PointerProperty,
+    StringProperty,
 )
+from bpy.types import PropertyGroup
 
-from .moodboard_scene_recon_tab_props import MixieMoodboardTabSceneReconProps  # noqa: F401
-from .moodboard_character_component_props import MixieCharacterComponentSettings  # noqa: F401
-from .moodboard_catalog_tab_props import (  # noqa: F401
+from .moodboard_catalog_tab_props import (
     MixieMoodboardTabAIRenderProps,
     MixieMoodboardTabAnimateProps,
     MixieMoodboardTabRetopologyProps,
@@ -32,29 +30,35 @@ from .moodboard_catalog_tab_props import (  # noqa: F401
     MixieMoodboardTabVideoGenProps,
     MixieMoodboardTabWorldLabsProps,
 )
+from .moodboard_character_component_props import (
+    MixieCharacterComponentSettings,
+)
+
 # Scene Gen Experimental disabled — PropertyGroups intentionally not imported/registered.
-# from .moodboard_scene_gen_exp_tab_props import (  # noqa: F401
+# from .moodboard_scene_gen_exp_tab_props import (
 #     MixieSceneGenExpBBox,
 #     MixieSceneGenExpLabelObject,
 #     MixieMoodboardTabSceneGenExpProps,
 # )
-
 from .moodboard_enum_callbacks import (
     _get_image_gen_mode_items,
-    _get_imagegen_model_items,
-    _get_imagegen_style_items,
     _get_imagegen_aspect_ratio_items,
+    _get_imagegen_model_items,
     _get_imagegen_resolution_items,
-    _on_model_changed,
-    _get_model_3d_items,  # noqa: F401 — legacy fallback, kept importable
-    _get_model_gen_mode_items,
-    _get_model_gen_model_items,
-    _get_texture_gen_mode_items,
-    _get_texture_gen_model_items,
-    _get_pbr_gen_mode_items,
-    _get_pbr_gen_model_items,
+    _get_imagegen_style_items,
     _get_mesh_segment_mode_items,
     _get_mesh_segment_model_items,
+    _get_model_3d_items,  # noqa: F401 - legacy fallback, kept importable
+    _get_model_gen_mode_items,
+    _get_model_gen_model_items,
+    _get_pbr_gen_mode_items,
+    _get_pbr_gen_model_items,
+    _get_texture_gen_mode_items,
+    _get_texture_gen_model_items,
+    _on_model_changed,
+)
+from .moodboard_scene_recon_tab_props import (
+    MixieMoodboardTabSceneReconProps,
 )
 
 
@@ -432,6 +436,89 @@ class MixieMoodboardTabImageTo3DProps(PropertyGroup):
         items=_get_model_gen_model_items,
         update=_on_model_changed,
     )
+
+    # Tripo can use the normal Mixar credit/backend route or an optional BYOK
+    # route to the provider's public v3 API. The key is SKIP_SAVE and is copied
+    # to the OS credential vault by the generate operator, never to a .blend.
+    tripo_input_mode: EnumProperty(
+        name="Input",
+        items=(
+            ('SINGLE', "Single", "Use one image, or the prompt when no image is selected"),
+            ('MULTI', "Multi View", "Use two to four labeled views"),
+        ), default='SINGLE',
+    )
+    tripo_use_direct_api: BoolProperty(
+        name="Use Direct Tripo API",
+        description="Use your Tripo API key and Tripo credits instead of the Mixar backend",
+        default=False,
+    )
+    tripo_api_model: EnumProperty(
+        name="Tripo Model",
+        description="Provider model version used by the direct Tripo API",
+        items=(
+            (
+                'v3.1-20260211',
+                "Tripo 3.1 (Normal)",
+                "Current standard Tripo 3.1 generation model",
+                0,
+            ),
+            (
+                'P1-20260311',
+                "Tripo P1",
+                "Tripo P1 generation model",
+                1,
+            ),
+        ),
+        default='v3.1-20260211',
+    )
+    tripo_front_image: PointerProperty(type=bpy.types.Image, name="Front")
+    tripo_left_image: PointerProperty(type=bpy.types.Image, name="Left")
+    tripo_back_image: PointerProperty(type=bpy.types.Image, name="Back")
+    tripo_right_image: PointerProperty(type=bpy.types.Image, name="Right")
+    tripo_texture: BoolProperty(name="Texture", default=True)
+    tripo_pbr: BoolProperty(name="PBR", default=True)
+    tripo_face_limit: IntProperty(
+        name="Face Limit", default=0, min=0, max=20000,
+        description="0 lets Tripo choose; otherwise 50-20,000",
+    )
+    tripo_model_seed: IntProperty(name="Model Seed", default=0, min=0)
+    tripo_texture_quality: EnumProperty(
+        name="Texture Quality",
+        items=(
+            ('standard', "Standard", "Faster texture generation"),
+            ('detailed', "Detailed", "Higher-detail texture generation"),
+        ),
+        default='standard',
+    )
+    tripo_geometry_quality: EnumProperty(
+        name="Geometry Quality",
+        items=(
+            ('standard', "Standard", "Faster geometry generation"),
+            ('detailed', "Detailed", "Higher-detail geometry generation"),
+        ),
+        default='standard',
+    )
+    tripo_texture_alignment: EnumProperty(
+        name="Texture Alignment",
+        items=(
+            ('original_image', "Original Image", "Prioritize the input colors"),
+            ('geometry', "Geometry", "Prioritize the generated geometry"),
+        ),
+        default='original_image',
+    )
+    tripo_orientation: EnumProperty(
+        name="Orientation",
+        items=(
+            ('default', "Automatic", "Let Tripo choose the model orientation"),
+            ('align_image', "Align to Front", "Align to the front image viewpoint"),
+        ),
+        default='default',
+    )
+    tripo_api_key: StringProperty(
+        name="Tripo API Key", default='', subtype='PASSWORD',
+        maxlen=256, options={'SKIP_SAVE'},
+    )
+    tripo_key_preview: StringProperty(default='', options={'SKIP_SAVE'})
 
     # Which multi-view (turnaround) set the Multiple Views panel is showing
     # and growing. UI STATE ONLY — it does not decide what a generation

@@ -306,7 +306,9 @@ def _draw_form(col, wm, disabled):
     field_dropdown(body, wm, 'byok_form_provider')
     body.separator(factor=0.45)
 
-    if model_suggestions.is_openrouter(wm.byok_form_provider):
+    if model_suggestions.is_openai_compatible(wm.byok_form_provider):
+        _draw_openai_compatible_fields(box, body, wm)
+    elif model_suggestions.is_openrouter(wm.byok_form_provider):
         _draw_openrouter_fields(body, wm)
     elif model_suggestions.is_codex(wm.byok_form_provider):
         _draw_codex_fields(body, wm)
@@ -315,6 +317,17 @@ def _draw_form(col, wm, disabled):
         byok_local_ops.draw_local_fields(body, wm)
     else:
         _draw_cloud_fields(body, wm)
+
+
+def _draw_openai_compatible_fields(box, body, wm):
+    from ..components.openai_compatible_draw import draw
+
+    def _draw_tall_prop(layout, data, prop, label):
+        field_label(layout, label)
+        field_input(layout, data, prop)
+        layout.separator(factor=0.45)
+
+    draw(box, body, wm, _draw_tall_prop)
 
 
 def _draw_cloud_fields(body, wm):
