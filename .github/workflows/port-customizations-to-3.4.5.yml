@@ -46,6 +46,11 @@ jobs:
           if ! git apply --3way --index "$RUNNER_TEMP/mixar-custom.patch"; then
             echo "::error::Automatic 3-way patch application found conflicts."
             git status --short
+            echo "===== CONFLICT DIFFS ====="
+            while IFS= read -r f; do
+              echo "===== $f ====="
+              git diff --cc -- "$f" || true
+            done < <(git diff --name-only --diff-filter=U)
             exit 1
           fi
 
