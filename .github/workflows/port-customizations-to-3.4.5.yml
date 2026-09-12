@@ -205,7 +205,7 @@ jobs:
             src/scripts/mixar/modules/moodboard \
             src/scripts/mixar/modules/common/generation_params \
             src/scripts/mixar/modules/space_mixie_chat
-          python -m pip install --disable-pip-version-check -q pytest
+          python -m pip install --disable-pip-version-check -q pytest httpx
           python -m pytest -q \
             tests/moodboard/test_catalog_model_resolution.py \
             tests/moodboard/test_turnaround_views.py \
