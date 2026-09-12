@@ -26,7 +26,7 @@
 #define BLENDER_VERSION_CYCLE release
 
 #define MIXAR_VERSION 304
-#define MIXAR_VERSION_PATCH 4
+#define MIXAR_VERSION_PATCH 5
 #define MIXAR_VERSION_CYCLE release
 
 /* Mixar file format version, stored in FileGlobal.
@@ -65,7 +65,7 @@ const char *BKE_blender_version_string_compact(void);
 /** Returns true when version cycle is alpha, otherwise (beta, rc) returns false. */
 bool BKE_blender_version_is_alpha(void);
 
-/** Returns true when version suffix is LTS, otherwise returns false. */
+/** Returns true when version suffix is LTS, otherwise (beta, rc) returns false. */
 bool BKE_blender_version_is_lts(void);
 
 /**
@@ -77,8 +77,19 @@ bool BKE_blender_version_is_lts(void);
  *
  * \param file_subversion: the file subversion, if given value < 0, it is ignored, and only the
  * `file_version` is used.
+ *
+ * \param file_version: The file version to be used.
  */
 void BKE_blender_version_blendfile_string_from_values(char *str_buff,
-                                                      const size_t str_buff_maxncpy,
-                                                      const short file_version,
-                                                      const short file_subversion);
+                                                       size_t str_buff_maxncpy,
+                                                       short file_version,
+                                                       short file_subversion);
+
+/** As above with the current file version. */
+void BKE_blender_version_blendfile_string(char *str_buff,
+                                           size_t str_buff_maxncpy,
+                                           short file_version,
+                                           short file_subversion);
+
+/** Returns a user-readable version number. */
+const char *BKE_blender_version_string(void);
