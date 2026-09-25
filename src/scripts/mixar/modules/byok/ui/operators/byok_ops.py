@@ -25,14 +25,16 @@ import os
 
 import bpy
 from bpy.types import Operator
-from mixar.config.logging_config import get_logger
 
-from ...core import byok_client, model_suggestions
+from mixar.config.logging_config import get_logger
+from mixar.modules.common.ui.constants import CARD_DIALOG_WIDTH
+
+from ...core import byok_client, credential_state, model_suggestions, models_cache
+from ...core import preference_state
 from . import byok_dialog_ui
 from .byok_state_ops import (
     _apply_cached_state,
     _clear_cached_state,
-    _on_models_catalog_done,
     _redraw_mixie_chat_areas,
 )
 
@@ -49,34 +51,41 @@ def _wipe_form_secrets(wm):
         'byok_form_api_key',
         'byok_form_codex_bundle',
         'byok_form_local_custom_key',
-        'byok_form_api_key', 'byok_form_codex_bundle',
-        'byok_custom_api_key', 'byok_custom_api_key_visible',
     ):
         try:
             setattr(wm, attr, '')
-        except Exception as exc:
-            logger.debug(
-                "Could not wipe transient BYOK field %s: %s",
-                attr,
-                type(exc).__name__,
-            )
-
-
-def _clear_custom_local_state(wm):
-    """Remove the local compatible-provider trust anchor and UI override."""
-    from mixar.modules.common.secure_storage import delete_secret
-
-    delete_secret('openai_compatible_api_key')
-    delete_secret('openai_compatible_config')
-    wm.byok_custom_enabled = False
-    wm.byok_custom_active_route = ''
-    _clear_cached_state(wm)
-    _wipe_form_secrets(wm)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
 # Dialog entry point
 # ---------------------------------------------------------------------------
+
+def _dialog_host_window(context):
+    """The main window the dialog should open over, or None to stay put.
+
+    An Agent Bubble window (island or pill) is a small always-on-top overlay:
+    a props dialog opened there is clipped to its height. Prefer the window
+    with the most areas that is NOT a bubble — the primary workspace window.
+    """
+    try:
+        from mixar.modules.agent_bubble.core.bubble_lifecycle import (
+            is_agent_bubble_window,
+        )
+    except Exception:  # noqa: BLE001 — stripped builds: stay in place
+        return None
+    try:
+        if not is_agent_bubble_window(context.window):
+            return None
+        candidates = [w for w in context.window_manager.windows
+                      if not is_agent_bubble_window(w) and w.screen.areas]
+    except Exception:  # noqa: BLE001
+        return None
+    if not candidates:
+        return None
+    return max(candidates, key=lambda w: len(w.screen.areas))
+
 
 class MIXAR_BYOK_OT_open_dialog(Operator):
     """Configure your own API provider and key for the Mixar agent"""
@@ -113,15 +122,6 @@ class MIXAR_BYOK_OT_open_dialog(Operator):
                     wm.byok_form_openrouter_model = wm.byok_current_model
             elif model_suggestions.is_local(wm.byok_current_provider):
                 pass  # prefilled below by byok_local_ops.prepare_dialog
-            elif model_suggestions.is_codex(wm.byok_current_provider):
-                # Codex uses a free-text model slug, not the catalog dropdown.
-                if wm.byok_current_model:
-                    wm.byok_form_codex_model = wm.byok_current_model
-            elif model_suggestions.is_openai_compatible(wm.byok_current_provider):
-                if wm.byok_custom_active_route:
-                    wm.byok_custom_route = wm.byok_custom_active_route
-                if wm.byok_current_model:
-                    wm.byok_custom_model = wm.byok_current_model
             elif wm.byok_current_model:
                 try:
                     wm.byok_form_model = wm.byok_current_model
@@ -134,7 +134,7 @@ class MIXAR_BYOK_OT_open_dialog(Operator):
         # dropdown becomes populated by the time the user picks. (Belt-
         # and-suspenders — the auth login hook normally fires this already.)
         if not model_suggestions.is_loaded():
-            byok_client.fetch_models_catalog(on_done=_on_models_catalog_done)
+            models_cache.refresh()
         # Local provider: refresh the managed-model item cache and prefill
         # mode/model from the last registration (cheap; guarded — the local
         # runtime module may be unavailable in stripped builds).
@@ -146,7 +146,18 @@ class MIXAR_BYOK_OT_open_dialog(Operator):
         # invoke_props_dialog (not invoke_popup) so the dialog redraws
         # continuously — state flips from SAVING → IDLE / ERROR during
         # the async save must be visible without user interaction.
-        return wm.invoke_props_dialog(self, width=640)
+        #
+        # Both the profile and chat picker open this shared dialog. A popup
+        # block in the Agent Bubble's ~460px window would be clipped over the
+        # composer, so host it in the main window instead.
+        # Override the WINDOW only: the bubble's screen is a temporary one and
+        # `temp_override(screen=...)` refuses it outright ("Overriding context
+        # with an active temporary screen isn't supported").
+        host = _dialog_host_window(context)
+        if host is not None and host != context.window:
+            with context.temp_override(window=host):
+                return wm.invoke_props_dialog(self, width=CARD_DIALOG_WIDTH)
+        return wm.invoke_props_dialog(self, width=CARD_DIALOG_WIDTH)
 
     def execute(self, context):
         # No-op: Save / Remove are their own operators, invoked from draw().
@@ -189,9 +200,6 @@ class MIXAR_BYOK_OT_save(Operator):
             return {'CANCELLED'}
         provider = wm.byok_form_provider
 
-        if model_suggestions.is_openai_compatible(provider):
-            from .openai_compatible_ops import start_request
-            return start_request(wm, action='save')
         if model_suggestions.is_openrouter(provider):
             return self._execute_openrouter(wm)
         if model_suggestions.is_codex(provider):
@@ -219,7 +227,7 @@ class MIXAR_BYOK_OT_save(Operator):
             provider=provider,
             model=model,
             api_key=api_key,
-            on_done=_on_save_done,
+            on_done=_save_callback(),
         )
         return {'FINISHED'}
 
@@ -241,7 +249,7 @@ class MIXAR_BYOK_OT_save(Operator):
             provider='openrouter',
             model=model,
             api_key=api_key,
-            on_done=_on_save_done,
+            on_done=_save_callback(),
         )
         return {'FINISHED'}
 
@@ -249,9 +257,9 @@ class MIXAR_BYOK_OT_save(Operator):
         """Local save: managed requires the supervised server healthy;
         custom pings the user's server off-thread first. Both end in the
         same PUT /agent/byok (with base_url + supports_vision) and the
-        shared _on_save_done callback."""
+        shared save callback."""
         from . import byok_local_ops
-        result = byok_local_ops.execute_local(self, wm, on_done=_on_save_done)
+        result = byok_local_ops.execute_local(self, wm, on_done=_save_callback())
         _redraw_mixie_chat_areas()
         return result
 
@@ -274,7 +282,7 @@ class MIXAR_BYOK_OT_save(Operator):
             provider='codex',
             model=model,
             api_key=bundle,
-            on_done=_on_save_done,
+            on_done=_save_callback(),
         )
         return {'FINISHED'}
 
@@ -298,18 +306,31 @@ def _deregister_local_if_switched_away(active_provider):
         logger.warning("Local deregistration skipped: %s", e)
 
 
-def _on_save_done(success: bool, data, err):
+def _save_callback():
+    """Bind the submit-time credential epoch into the save callback.
+
+    The PUT is async; if the user logs out before it lands, the echo must not
+    write the logged-out account's provider back into the mirror.
+    """
+    epoch = credential_state.current_epoch()
+
+    def _done(success: bool, data, err):
+        _on_save_done(success, data, err, epoch=epoch)
+
+    return _done
+
+
+def _on_save_done(success: bool, data, err, epoch=None):
     """Main-thread save callback."""
     try:
         wm = bpy.context.window_manager
         if success:
-            from mixar.modules.common.secure_storage import delete_secret
-            wm.byok_custom_enabled = False
-            wm.byok_custom_active_route = ''
-            delete_secret('openai_compatible_api_key')
-            delete_secret('openai_compatible_config')
-            _apply_cached_state(wm, data or {})
+            applied = _apply_cached_state(wm, data or {}, epoch)
             _wipe_form_secrets(wm)
+            if not applied:
+                logger.debug("BYOK save landed after logout; echo dropped")
+                return
+            preference_state.refresh()
             # SAVED, not IDLE: the dialog shows an explicit recap with a
             # single Done button, so the user never has to wonder
             # whether the save landed.
@@ -345,7 +366,7 @@ class MIXAR_BYOK_OT_codex_load_file(Operator):
         try:
             with open(path, "r", encoding="utf-8") as f:
                 content = f.read().strip()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.warning("Codex auth.json read failed: %s", e)
             self.report({'ERROR'}, "Could not read ~/.codex/auth.json")
             return {'CANCELLED'}
@@ -430,43 +451,12 @@ class MIXAR_BYOK_OT_confirm_remove(Operator):
 
     def execute(self, context):
         wm = context.window_manager
-        if model_suggestions.is_openai_compatible(wm.byok_current_provider):
-            from ...constants import OPENAI_COMPATIBLE_ROUTE_MIXAR
-
-            wm.byok_dialog_state = 'REMOVING'
-            wm.byok_last_error = ''
-            _redraw_mixie_chat_areas()
-            if wm.byok_custom_active_route == OPENAI_COMPATIBLE_ROUTE_MIXAR:
-                byok_client.delete_credentials(on_done=_on_custom_relay_delete_done)
-                return {'FINISHED'}
-
-            _clear_custom_local_state(wm)
-            wm.byok_dialog_state = 'REMOVED'
-            _redraw_mixie_chat_areas()
-            byok_client.fetch_state(on_done=_on_fetch_done)
-            return {'FINISHED'}
         wm.byok_dialog_state = 'REMOVING'
         wm.byok_last_error = ''
         _redraw_mixie_chat_areas()
 
         byok_client.delete_credentials(on_done=_on_delete_done)
         return {'FINISHED'}
-
-
-def _on_custom_relay_delete_done(success: bool, _removed_count: int, err):
-    """Delete local relay approval only after backend unregister succeeds."""
-    try:
-        wm = bpy.context.window_manager
-        if success:
-            _clear_custom_local_state(wm)
-            wm.byok_dialog_state = 'IDLE'
-            wm.byok_last_error = ''
-        else:
-            wm.byok_dialog_state = 'ERROR'
-            wm.byok_last_error = err or "Could not unregister the Mixar relay."
-        _redraw_mixie_chat_areas()
-    except Exception as exc:
-        logger.error("Custom relay delete callback failed: %s", exc, exc_info=True)
 
 
 def _on_delete_done(success: bool, removed_count: int, err):
@@ -476,6 +466,7 @@ def _on_delete_done(success: bool, removed_count: int, err):
         if success:
             _clear_cached_state(wm)
             _wipe_form_secrets(wm)
+            preference_state.refresh()
             # REMOVED, not IDLE — explicit recap, same as the save path.
             wm.byok_dialog_state = 'REMOVED'
             wm.byok_last_error = ''

@@ -17,7 +17,7 @@ from .sidebar_ui_helpers import (
     draw_toggle, draw_image_info_card, draw_status_badge,
 )
 from mixar.modules.moodboard.constants import SEP_INTRA, SEP_SECTION
-from mixar.modules.moodboard.core.media_utils import is_still_item
+from mixar.modules.moodboard.core.media_utils import selected_reference_stills
 from .queue_drawer import draw_queue as _draw_queue
 from .world_labs_drawer import draw_world_labs as _draw_world_labs
 
@@ -71,10 +71,8 @@ def _draw_imagegen(layout, context):
     draw_toggle(col, tab, "use_reference_images", text=ref_label)
 
     if tab.use_reference_images:
-        if hasattr(scene, 'mixie_moodboard_images'):
-            for item in scene.mixie_moodboard_images:
-                if item.selected and is_still_item(item):
-                    draw_image_info_card(col, item.image)
+        for item in selected_reference_stills(scene):
+            draw_image_info_card(col, item.image)
         if selected_count == 0:
             row = col.row()
             row.label(text="No image selected in moodboard", icon='ERROR')
@@ -244,9 +242,11 @@ def _draw_image_to_3d_basic(layout, context):
         )
 
     # --- Turnaround sheet -> per-view crops (multi-view models only) ---
-    # Offline fallback path. model_accepts_multi_view() normally reads the
-    # catalog flag and has a narrow override for the Tripo 3.1/P1 contracts
-    # implemented by this client. Unknown model versions remain hidden.
+    # Offline fallback path. There is no longer a hardcoded slug list behind
+    # this: model_accepts_multi_view() reads the catalog's supports_multi_view
+    # flag and returns False when the catalog has not loaded, so this section
+    # simply renders nothing offline — which is correct, since the job could
+    # not be submitted then either.
     from .turnaround_drawer import draw_detect_views_section
     draw_section_separator(layout)
     draw_detect_views_section(

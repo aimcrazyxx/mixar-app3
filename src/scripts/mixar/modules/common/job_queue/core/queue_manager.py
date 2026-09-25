@@ -19,19 +19,19 @@ lifecycle lives in ``queue_download.DownloadMixin``.
 """
 
 import time
-from contextlib import suppress
 from typing import NamedTuple
 
 import bpy
+
 from mixar.config.logging_config import get_logger
 from mixar.modules.common.api.exceptions import (
     AuthenticationError,
-)
-from mixar.modules.common.api.exceptions import (
     ConnectionError as APIConnectionError,
-)
-from mixar.modules.common.api.exceptions import (
     TimeoutError as APITimeoutError,
+)
+from .model_io import (
+    get_poll_interval,
+    redraw_3d_views,
 )
 
 from ..constants import (
@@ -41,11 +41,7 @@ from ..constants import (
     MAX_POLL_DURATION,
 )
 from .error_helpers import classify_error
-from .job import FAILED_BACKEND_STATUSES, RUNNING_STATES, TERMINAL_STATES, Job, JobState
-from .model_io import (
-    get_poll_interval,
-    redraw_3d_views,
-)
+from .job import FAILED_BACKEND_STATUSES, Job, JobState, RUNNING_STATES, TERMINAL_STATES
 from .queue_download import DownloadMixin
 
 logger = get_logger(__name__)
@@ -187,13 +183,10 @@ def handle_backend_job_update(payload: dict) -> bool:
     status = _JOBQ_STATE_TO_STATUS.get(state, "")
     if status:
         job.backend_status = status
-        if (
-            status in {"SUBMITTED", "POLLING"}
-            and hasattr(job, "_processing_started")
-            and not job._processing_started
-        ):
-            job._processing_started = True
-            job.poll_start_time = time.time()
+        if status in {"SUBMITTED", "POLLING"}:
+            if hasattr(job, "_processing_started") and not job._processing_started:
+                job._processing_started = True
+                job.poll_start_time = time.time()
     if payload.get("error"):
         job.error = str(payload.get("error"))
     queue._notify()
@@ -336,7 +329,9 @@ def _ensure_sync_watchdog() -> None:
                     job.state == JobState.RUNNING_POLL
                     and job.poll_start_time > 0
                     and now - job.poll_start_time > MAX_POLL_DURATION
-                ) or (
+                ):
+                    queue._fail_timed_out(job)
+                elif (
                     job.state == JobState.RUNNING_DOWNLOAD
                     and job.download_started_at > 0
                     and now_mono - job.download_started_at
@@ -382,6 +377,12 @@ class FeatureQueue(DownloadMixin):
 
     def submit(self, job: Job) -> bool:
         """Submit a job. Returns False if a duplicate is already queued."""
+        # Consume even a rejected enqueue's ref; only accepted jobs own it.
+        from mixar.modules.common.utils.agent_feedback import take_agent_ref
+        from .agent_batches import current_agent_batch
+
+        batch = current_agent_batch()
+        ref = dict(batch.ref) if batch is not None else take_agent_ref(bpy.context)
         # Dedup: reject if same label is already active
         if job.label and any(
             j.label == job.label and j.state not in TERMINAL_STATES
@@ -390,6 +391,8 @@ class FeatureQueue(DownloadMixin):
             logger.warning("%s duplicate job rejected: %s", LOG_PREFIX, job.label)
             return False
         job.feature_key = self.feature_key
+        if ref:
+            job.agent_ref = ref
         # Stamp the originating scene (submit runs on the main thread) so the
         # scene-flag listener targets the scene that started the job, not
         # whatever is active when a later notification fires.
@@ -401,6 +404,8 @@ class FeatureQueue(DownloadMixin):
             except Exception:
                 pass
         self._jobs.append(job)
+        if batch is not None:
+            batch.add(job)
         self._notify_enqueue_toast(job)
         self._notify()
         self._pump()
@@ -436,6 +441,7 @@ class FeatureQueue(DownloadMixin):
         self._pump()
 
     def clear_completed(self) -> None:
+        self._report_agent_results()
         self._jobs = [j for j in self._jobs if j.state not in TERMINAL_STATES]
         self._notify()
 
@@ -468,6 +474,7 @@ class FeatureQueue(DownloadMixin):
                     "%s resource release failed for %s: %s",
                     LOG_PREFIX, job.id, e,
                 )
+        self._report_agent_results()
         self._jobs = []
         self._notify()
 
@@ -479,8 +486,10 @@ class FeatureQueue(DownloadMixin):
             self._listeners.append(fn)
 
     def remove_listener(self, fn) -> None:
-        with suppress(ValueError):
+        try:
             self._listeners.remove(fn)
+        except ValueError:
+            pass
 
     def running_count(self) -> int:
         return sum(1 for j in self._jobs if j.state in RUNNING_STATES)
@@ -610,6 +619,7 @@ class FeatureQueue(DownloadMixin):
                         LOG_PREFIX, job.id, e,
                     )
         self._notify_failure_toasts()
+        self._report_agent_results()
         self._refresh_queue_toast()
         self._ensure_status_pump()
         for fn in list(self._listeners):
@@ -619,12 +629,26 @@ class FeatureQueue(DownloadMixin):
                 logger.warning("%s listener failed: %s", LOG_PREFIX, e)
         redraw_3d_views()
 
+    def _report_agent_results(self) -> None:
+        """Push the terminal outcome of agent-enqueued jobs to the backend.
+
+        Edge-detected per job (``_agent_reported``) and a no-op for every
+        user-initiated job, whose ``agent_ref`` is empty. Unacknowledged results
+        stay in the independent outbox for timed retries and reconnect sweeps,
+        even if the visible job history is cleared.
+        """
+        try:
+            from .agent_results import report_agent_results
+            report_agent_results(self._jobs)
+        except Exception as e:
+            logger.debug("%s agent result report failed: %s", LOG_PREFIX, e)
+
     def _notify_failure_toasts(self) -> None:
         """Surface a viewport toast once for each newly-FAILED job.
 
         A uniform safety net so a failed paid generation is never silent —
-        previously only features whose listener passed ``batch_popup_title``
-        showed any feedback, so Image Gen / Lookdev / Hunyuan UV / Texture
+        previously only features with a batch summary popup showed any
+        feedback, so Image Gen / Lookdev / Hunyuan UV / Texture
         Edit failures were invisible unless the Queue panel was open.
         """
         for job in self._jobs:
@@ -715,7 +739,7 @@ class FeatureQueue(DownloadMixin):
         if job.should_skip_poll():
             job.state = JobState.RUNNING_DOWNLOAD
             self._notify()
-            self._begin_download(job, job.inline_result_files())
+            self._begin_download(job, [])
             return
 
         job.state = JobState.RUNNING_POLL
@@ -744,10 +768,9 @@ class FeatureQueue(DownloadMixin):
         if isinstance(error, AuthenticationError):
             self._enter_auth_pause(job, error)
             return
-        if isinstance(error, (APITimeoutError, APIConnectionError)) and self._retry_submit_later(
-            job, error
-        ):
-            return
+        if isinstance(error, (APITimeoutError, APIConnectionError)):
+            if self._retry_submit_later(job, error):
+                return
         job.state = JobState.FAILED
         job.error = str(error)
         job.user_message = classify_error(error) or "Submission failed"

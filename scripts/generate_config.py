@@ -59,22 +59,7 @@ def generate_config(version_file: str) -> dict:
     inside the runtime bundle.
     """
 
-    # VERSION is canonical for release builds. A stale MIXAR_VERSION inherited
-    # from a shell or CI environment must never make mixar.json disagree with
-    # the version compiled into the binary. Keep the env var only as a fallback
-    # for unusual source trees that genuinely do not have a VERSION file.
-    file_version = _read_version(version_file)
-    env_version = _env("MIXAR_VERSION")
-    if file_version and file_version != "0.0.0":
-        version = file_version
-        if env_version and env_version != file_version:
-            print(
-                f"Warning: ignoring MIXAR_VERSION={env_version}; "
-                f"VERSION is {file_version}"
-            )
-    else:
-        version = env_version or file_version or "0.0.0"
-
+    version = _env("MIXAR_VERSION") or _read_version(version_file)
     environment = _env("MIXAR_ENV", "Prod")
 
     bypass_enabled = _env_bool("DEV_BYPASS_ENABLED", False)
@@ -114,11 +99,15 @@ def generate_config(version_file: str) -> dict:
             "auto_download": _env_bool("MIXAR_UPDATE_AUTO_DOWNLOAD", True),
         },
         # Enterprise network settings (empty = auto). Environment variables
-        # MIXAR_PROXY_URL / MIXAR_CA_BUNDLE / MIXAR_NO_PROXY take precedence.
-        # See docs/enterprise-network.md.
+        # MIXAR_PROXY_URL / MIXAR_CA_BUNDLE / MIXAR_EXTRA_CA_CERTS / MIXAR_NO_PROXY
+        # take precedence. ca_bundle REPLACES the trusted roots; extra_ca_certs
+        # ADDS files or folders of certificates on top (the per-user and
+        # machine-wide certs folders are always scanned). See
+        # docs/enterprise-network.md.
         "network": {
             "proxy_url": "",
             "ca_bundle": "",
+            "extra_ca_certs": "",
             "no_proxy": "",
         },
     }

@@ -84,68 +84,6 @@ def test_catalog_default_model_survives_cache_import_failure():
 
 
 # ---------------------------------------------------------------------------
-# Multi-view capability — catalog flag plus implemented Tripo contracts
-# ---------------------------------------------------------------------------
-
-def _catalog_model(slug, **fields):
-    return {"slug": slug, **fields}
-
-
-@pytest.mark.parametrize("slug", [
-    "tripo-v31",
-    "tripo-v3.1",
-    "tripo-p1",
-    "P1-20260311",
-])
-def test_current_tripo_models_support_multiview_with_a_stale_catalog(slug):
-    from mixar.modules.common.generation_params import model_supports_multi_view
-
-    row = _catalog_model(slug, supports_multi_view=False)
-    with patch(
-        "mixar.bootstrap.generation_catalog_cache.get_model",
-        return_value=row,
-    ):
-        assert model_supports_multi_view("model_3d", slug) is True
-
-
-def test_tripo_provider_model_id_can_supply_the_multiview_capability():
-    from mixar.modules.common.generation_params import model_supports_multi_view
-
-    row = _catalog_model(
-        "tripo-current",
-        supports_multi_view=False,
-        provider_model_id="v3.1-20260211",
-    )
-    with patch(
-        "mixar.bootstrap.generation_catalog_cache.get_model",
-        return_value=row,
-    ):
-        assert model_supports_multi_view("model_3d", "tripo-current") is True
-
-
-def test_unknown_legacy_tripo_model_still_fails_closed():
-    from mixar.modules.common.generation_params import model_supports_multi_view
-
-    row = _catalog_model("tripo-low", supports_multi_view=False)
-    with patch(
-        "mixar.bootstrap.generation_catalog_cache.get_model",
-        return_value=row,
-    ):
-        assert model_supports_multi_view("model_3d", "tripo-low") is False
-
-
-def test_private_catalog_multiview_flag_is_accepted_during_migration():
-    from mixar.modules.common.generation_params import model_supports_multi_view
-
-    row = _catalog_model("future-model", _supports_multi_view=True)
-    with patch(
-        "mixar.bootstrap.generation_catalog_cache.get_model",
-        return_value=row,
-    ):
-        assert model_supports_multi_view("model_3d", "future-model") is True
-
-
-# ---------------------------------------------------------------------------
 # Scene Gen — was SCENE_GEN_MODEL = "scene_gen_v1"
 # ---------------------------------------------------------------------------
 
@@ -205,7 +143,7 @@ def test_scene_gen_lp_pins_hunyuan_topology_deliberately():
     """
     from mixar.modules.hunyuan.constants import RETOPOLOGY_HUNYUAN_MODEL
 
-    source = (_MODULES / "moodboard/core/generation_enqueue.py").read_text()
+    source = (_MODULES / "moodboard/core/generation_enqueue.py").read_text(encoding="utf-8")
     assert "RETOPOLOGY_HUNYUAN_MODEL" in source
     assert "catalog_default_model" not in source, (
         "Scene Gen LP must not resolve its engine from the catalog default"
@@ -274,6 +212,6 @@ def test_pr_adds_no_new_hardcoded_vendor_version_slugs():
         path.relative_to(_MODULES).as_posix()
         for path in _MODULES.rglob("*.py")
         if "__pycache__" not in path.parts
-        and "hunyuan_pro_v3.1" in path.read_text()
+        and "hunyuan_pro_v3.1" in path.read_text(encoding="utf-8")
     )
     assert offenders == ["moodboard/core/generation_enqueue.py"], offenders

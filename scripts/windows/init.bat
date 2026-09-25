@@ -3,78 +3,67 @@ REM
 REM SPDX-License-Identifier: GPL-2.0-or-later
 
 @echo off
-setlocal EnableExtensions EnableDelayedExpansion
+setlocal enabledelayedexpansion
 
-REM Initialize Blender to the exact commit specified by the parent repository.
+REM Initialize submodule to the exact commit specified by parent repo.
+REM LFS smudge is skipped here so the initial checkout stays fast; the LFS
+REM content is fetched explicitly further down.
 echo Initializing Blender submodule...
 set "GIT_LFS_SKIP_SMUDGE=1"
 git submodule update --init --recursive --force --progress
-if errorlevel 1 (
-    echo Error: Failed to initialize Blender submodule.
+if %errorlevel% neq 0 (
+    echo Failed to initialize submodule
     exit /b 1
 )
 
-if not exist "upstream\CMakeLists.txt" (
-    echo Error: Blender upstream checkout is missing or incomplete.
-    exit /b 1
-)
-
-REM Blender's Windows bootstrap asks interactively whether lib/windows_x64
-REM should be downloaded when it is missing. GitHub Actions has no interactive
-REM stdin, so the prompt is interpreted as "no" and make update exits 1.
-REM Pre-initialize exactly the same dependency submodule as Blender's
-REM build_files/windows/check_libraries.cmd, then make update is non-interactive.
-echo Preparing Blender Windows x64 precompiled libraries...
-git -C upstream config --local "submodule.lib/windows_x64.update" "checkout"
-if errorlevel 1 (
-    echo Error: Failed to configure lib/windows_x64 submodule checkout.
-    exit /b 1
-)
-
-git -C upstream submodule update --progress --init "lib/windows_x64"
-if errorlevel 1 (
-    echo Error: Failed to initialize Blender lib/windows_x64.
-    exit /b 1
-)
-
-REM The dependency repository is LFS-backed. Skip smudge during checkout for
-REM reliability, then explicitly download all LFS objects once the checkout is ready.
+REM Re-enable LFS smudge for everything that follows. 'make update' checks out
+REM lib/windows_x64 itself (build_files/windows/lib_update.cmd), and with smudge
+REM still skipped it fills the library folder with LFS pointer files instead of
+REM real binaries. find_dependencies.cmd then picks up the pointer as PYTHON
+REM because it only tests 'if EXIST', and update_sources.cmd tries to execute
+REM it -- which Windows reports as "This version of ... python.exe is not
+REM compatible with the version of Windows you're running."
 set "GIT_LFS_SKIP_SMUDGE="
-git -C "upstream\lib\windows_x64" lfs pull
-if errorlevel 1 (
-    echo Error: Failed to download Blender lib/windows_x64 LFS objects.
+
+cd upstream
+if %errorlevel% neq 0 (
+    echo Failed to enter the upstream directory
     exit /b 1
 )
 
-if not exist "upstream\lib\windows_x64\.git" (
-    echo Error: Blender Windows x64 libraries were not initialized correctly.
-    exit /b 1
-)
-
-pushd upstream
-if errorlevel 1 (
-    echo Error: Failed to enter Blender upstream directory.
-    exit /b 1
-)
-
-REM Update Blender source/submodules now that the required Windows library
-REM checkout already exists, preventing check_libraries.cmd from prompting.
+REM Call make.bat by explicit relative path, and via 'call'. Two reasons:
+REM   - cmd does not search the current directory for executables when
+REM     NoDefaultCurrentDirectoryInExePath is set (Git Bash and similar shells
+REM     set it), so a bare 'make' is unresolvable even though make.bat is here.
+REM   - without 'call', control transfers to make.bat and never returns, so
+REM     everything below this line would silently be skipped.
 echo Running make update...
-make update
-if errorlevel 1 (
-    echo Error: Blender make update failed.
-    popd
+call .\make.bat update
+if %errorlevel% neq 0 (
+    echo Failed: make update
+    echo Try running 'make update' manually in the upstream directory.
+    cd ..
     exit /b 1
 )
 
-echo Pulling Blender source LFS files...
+REM Fetch LFS content. The platform libraries live in a NESTED submodule
+REM (upstream/lib/windows_x64), and a pull in the parent repo never descends
+REM into it, so pull inside the submodules as well.
+echo Pulling LFS files...
 git lfs pull
-if errorlevel 1 (
-    echo Error: Blender source git lfs pull failed.
-    popd
+if %errorlevel% neq 0 (
+    echo Failed: git lfs pull in upstream
+    cd ..
     exit /b 1
 )
 
-popd
+git submodule foreach --recursive "git lfs pull"
+if %errorlevel% neq 0 (
+    echo Failed: git lfs pull in the upstream submodules
+    cd ..
+    exit /b 1
+)
+
+cd ..
 echo Initialization complete!
 exit /b 0
