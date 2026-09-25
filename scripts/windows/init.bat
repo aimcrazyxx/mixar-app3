@@ -31,6 +31,38 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
+REM Blender marks platform libraries with "update = none" in .gitmodules.
+REM A recursive parent update therefore does not initialize lib/windows_x64,
+REM and make update falls back to an interactive y/n prompt. CI has no stdin,
+REM so initialize the required platform library explicitly before make update.
+set "BLENDER_PLATFORM_LIB=lib/windows_x64"
+if /I "%PROCESSOR_ARCHITECTURE%"=="ARM64" set "BLENDER_PLATFORM_LIB=lib/windows_arm64"
+
+echo Initializing Blender platform libraries: %BLENDER_PLATFORM_LIB%...
+git config --local "submodule.%BLENDER_PLATFORM_LIB%.update" checkout
+if %errorlevel% neq 0 (
+    echo Failed to configure Blender platform library checkout
+    cd ..
+    exit /b 1
+)
+
+set "GIT_LFS_SKIP_SMUDGE=1"
+git submodule update --init --force --progress "%BLENDER_PLATFORM_LIB%"
+if %errorlevel% neq 0 (
+    set "GIT_LFS_SKIP_SMUDGE="
+    echo Failed to initialize Blender platform libraries
+    cd ..
+    exit /b 1
+)
+set "GIT_LFS_SKIP_SMUDGE="
+
+git -C "%BLENDER_PLATFORM_LIB%" lfs pull
+if %errorlevel% neq 0 (
+    echo Failed to pull Blender platform library LFS files
+    cd ..
+    exit /b 1
+)
+
 REM Call make.bat by explicit relative path, and via 'call'. Two reasons:
 REM   - cmd does not search the current directory for executables when
 REM     NoDefaultCurrentDirectoryInExePath is set (Git Bash and similar shells
