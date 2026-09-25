@@ -10,7 +10,6 @@ permissions:
 
 jobs:
   sync:
-    if: github.event.head_commit.message == 'chore: bootstrap Mixar 4.0.0 sync'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout target branch
