@@ -37,6 +37,13 @@ jobs:
           lfs: true
           submodules: false
 
+      - name: Restore official 4.0.0 device identifier for release build
+        shell: pwsh
+        run: |
+          git fetch --no-tags --depth=1 https://github.com/Mixar-AI/mixar-app.git release/v4.0.0
+          git checkout FETCH_HEAD -- src/scripts/mixar/modules/auth/core/device.py
+          git diff -- src/scripts/mixar/modules/auth/core/device.py
+
       - name: Show toolchain
         shell: pwsh
         run: |
