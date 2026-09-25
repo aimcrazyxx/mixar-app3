@@ -1,0 +1,101 @@
+name: Build Mixar 4.0.0 Windows
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - release/v4.0.0
+    paths-ignore:
+      - "**/*.md"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mixar-v4-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-windows:
+    name: Windows x64 Release
+    runs-on: windows-2022
+    timeout-minutes: 360
+
+    env:
+      MIXAR_ENV: Prod
+      MIXAR_BACKEND_URL: https://api.mixar.app
+      MIXAR_FRONTEND_URL: https://www.mixar.app
+      MIXAR_CUDA: "0"
+      MIXAR_CUDA_BINARIES: "0"
+      BUILD_CORES: "4"
+
+    steps:
+      - name: Checkout Mixar 4.0.0
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          lfs: true
+          submodules: false
+
+      - name: Show toolchain
+        shell: pwsh
+        run: |
+          git --version
+          git lfs version
+          cmake --version
+          python --version
+          Write-Host "Branch: ${{ github.ref_name }}"
+          Write-Host "Commit: ${{ github.sha }}"
+
+      - name: Configure production build
+        shell: pwsh
+        run: |
+          @"
+          MIXAR_ENV=Prod
+          MIXAR_BACKEND_URL=https://api.mixar.app
+          MIXAR_FRONTEND_URL=https://www.mixar.app
+          MIXAR_LOG_LEVEL=INFO
+          MIXAR_CUDA=0
+          MIXAR_CUDA_BINARIES=0
+          "@ | Set-Content -Path .env -Encoding ascii
+          Get-Content .env
+
+      - name: Initialize Blender source and libraries
+        shell: cmd
+        run: scripts\windows\init.bat
+
+      - name: Re-pin submodules to Mixar 4.0.0
+        shell: cmd
+        run: git submodule update --init --recursive --force
+
+      - name: Build Mixar 4.0.0
+        shell: cmd
+        run: scripts\windows\build.bat
+
+      - name: Verify executable
+        shell: pwsh
+        run: |
+          $exe = "build/Prod/bin/mixar.exe"
+          if (-not (Test-Path $exe)) {
+            Write-Error "Expected executable not found: $exe"
+            exit 1
+          }
+          Get-Item $exe | Format-List FullName,Length,LastWriteTime
+
+      - name: Package Windows build
+        shell: pwsh
+        run: |
+          $source = "build/Prod/bin"
+          $archive = "Mixar-4.0.0-Windows-x64.zip"
+          if (Test-Path $archive) { Remove-Item $archive -Force }
+          Compress-Archive -Path "$source/*" -DestinationPath $archive -CompressionLevel Fastest
+          Get-Item $archive | Format-List FullName,Length,LastWriteTime
+
+      - name: Upload Mixar 4.0.0 Windows
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mixar-4.0.0-Windows-x64
+          path: Mixar-4.0.0-Windows-x64.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
