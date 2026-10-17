@@ -31,7 +31,8 @@ jobs:
       - name: Disable OneAPI for CPU runner
         shell: pwsh
         run: |
-          Add-Content -Path "cmake/mixar_overrides.cmake" -Value "`nset(WITH_CYCLES_DEVICE_ONEAPI OFF CACHE BOOL \"Disable Cycles Intel OneAPI device\" FORCE)"
+          $line = 'set(WITH_CYCLES_DEVICE_ONEAPI OFF CACHE BOOL "Disable Cycles Intel OneAPI device" FORCE)'
+          Add-Content -Path 'cmake/mixar_overrides.cmake' -Value $line
 
       - name: Enable Git LFS
         shell: pwsh
