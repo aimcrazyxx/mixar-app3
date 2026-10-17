@@ -1,0 +1,44 @@
+name: Windows build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    runs-on: windows-2022
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout Mixar
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Enable Git LFS
+        shell: pwsh
+        run: git lfs install --local
+
+      - name: Initialize Blender and Windows libraries
+        shell: cmd
+        run: call scripts\windows\init.bat
+
+      - name: Build Mixar (Ninja)
+        shell: cmd
+        env:
+          MIXAR_ENV: Prod
+          BUILD_WITH_NINJA: '1'
+        run: call scripts\windows\build_ninja.bat
+
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: mixar-windows-prod
+          path: build/Prod/bin/
+          if-no-files-found: error
+          retention-days: 14
