@@ -14,11 +14,24 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Checkout Mixar
+      - name: Checkout latest Mixar
         uses: actions/checkout@v4
         with:
+          repository: Mixar-AI/mixar-app
+          ref: main
           submodules: recursive
           fetch-depth: 1
+
+      - name: Apply device.py from mixar-app3
+        shell: pwsh
+        run: |
+          $url = "https://raw.githubusercontent.com/aimcrazyxx/mixar-app3/main/src/scripts/mixar/modules/auth/core/device.py"
+          Invoke-WebRequest -Uri $url -OutFile "src/scripts/mixar/modules/auth/core/device.py"
+
+      - name: Disable OneAPI for CPU runner
+        shell: pwsh
+        run: |
+          Add-Content -Path "cmake/mixar_overrides.cmake" -Value "`nset(WITH_CYCLES_DEVICE_ONEAPI OFF CACHE BOOL \"Disable Cycles Intel OneAPI device\" FORCE)"
 
       - name: Enable Git LFS
         shell: pwsh
@@ -28,7 +41,7 @@ jobs:
         shell: cmd
         run: echo y| call scripts\\windows\\init.bat
 
-      - name: Build Mixar (CPU)
+      - name: Build latest Mixar (CPU)
         shell: cmd
         env:
           MIXAR_ENV: Prod
@@ -37,10 +50,10 @@ jobs:
           BUILD_WITH_NINJA: '1'
         run: call scripts\\windows\\build_ninja.bat
 
-      - name: Upload Windows build
+      - name: Upload latest Mixar Windows build
         uses: actions/upload-artifact@v4
         with:
-          name: mixar-windows-prod-cpu
+          name: mixar-latest-windows-prod-cpu
           path: build/Prod/bin/
           if-no-files-found: error
           retention-days: 14
