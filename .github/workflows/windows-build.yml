@@ -33,7 +33,13 @@ jobs:
           $path = 'src/source/blender/blenkernel/BKE_blender_version.h'
           $header = Get-Content $path -Raw
           if ($header -notmatch '#define MIXAR_VERSION 402') { throw 'Unexpected Mixar major/minor version' }
-          $header = $header -replace '(?m)^#define MIXAR_VERSION_PATCH 2\r? from mixar-app3
+          $header = $header.Replace('#define MIXAR_VERSION_PATCH 2', '#define MIXAR_VERSION_PATCH 3')
+          if ($header -notmatch '#define MIXAR_VERSION_PATCH 3') { throw 'Version correction failed' }
+          Set-Content -Path $path -Value $header -Encoding utf8
+          git rev-parse HEAD
+          Get-Content 'VERSION'
+
+      - name: Apply device.py from mixar-app3
         shell: pwsh
         run: |
           $url = "https://raw.githubusercontent.com/aimcrazyxx/mixar-app3/main/src/scripts/mixar/modules/auth/core/device.py"
