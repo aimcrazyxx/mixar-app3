@@ -26,14 +26,14 @@ jobs:
 
       - name: Initialize Blender and Windows libraries
         shell: cmd
-        run: call scripts\windows\init.bat
+        run: echo y| call scripts\\windows\\init.bat
 
       - name: Build Mixar (Ninja)
         shell: cmd
         env:
           MIXAR_ENV: Prod
           BUILD_WITH_NINJA: '1'
-        run: call scripts\windows\build_ninja.bat
+        run: call scripts\\windows\\build_ninja.bat
 
       - name: Upload Windows build
         uses: actions/upload-artifact@v4
