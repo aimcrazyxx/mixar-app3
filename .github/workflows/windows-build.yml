@@ -28,17 +28,19 @@ jobs:
         shell: cmd
         run: echo y| call scripts\\windows\\init.bat
 
-      - name: Build Mixar (Ninja)
+      - name: Build Mixar (CPU)
         shell: cmd
         env:
           MIXAR_ENV: Prod
+          MIXAR_CUDA: '0'
+          MIXAR_CUDA_BINARIES: '0'
           BUILD_WITH_NINJA: '1'
         run: call scripts\\windows\\build_ninja.bat
 
       - name: Upload Windows build
         uses: actions/upload-artifact@v4
         with:
-          name: mixar-windows-prod
+          name: mixar-windows-prod-cpu
           path: build/Prod/bin/
           if-no-files-found: error
           retention-days: 14
