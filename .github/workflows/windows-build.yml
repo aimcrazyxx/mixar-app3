@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 aimcrazyxx
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 name: Windows build
 
 on:
@@ -35,48 +38,6 @@ jobs:
           if ($header -notmatch '#define MIXAR_VERSION 402') { throw 'Unexpected Mixar major/minor version' }
           $header = $header.Replace('#define MIXAR_VERSION_PATCH 2', '#define MIXAR_VERSION_PATCH 3')
           if ($header -notmatch '#define MIXAR_VERSION_PATCH 3') { throw 'Version correction failed' }
-          Set-Content -Path $path -Value $header -Encoding utf8
-          git rev-parse HEAD
-          Get-Content 'VERSION'
-
-      - name: Apply device.py from mixar-app3
-        shell: pwsh
-        run: |
-          $url = "https://raw.githubusercontent.com/aimcrazyxx/mixar-app3/main/src/scripts/mixar/modules/auth/core/device.py"
-          Invoke-WebRequest -Uri $url -OutFile "src/scripts/mixar/modules/auth/core/device.py"
-
-      - name: Disable OneAPI for CPU runner
-        shell: pwsh
-        run: |
-          $line = 'set(WITH_CYCLES_DEVICE_ONEAPI OFF CACHE BOOL "Disable Cycles Intel OneAPI device" FORCE)'
-          Add-Content -Path 'cmake/mixar_overrides.cmake' -Value $line
-
-      - name: Enable Git LFS
-        shell: pwsh
-        run: git lfs install --local
-
-      - name: Initialize Blender and Windows libraries
-        shell: cmd
-        run: echo y| call scripts\\windows\\init.bat
-
-      - name: Build latest Mixar (CPU)
-        shell: cmd
-        env:
-          MIXAR_ENV: Prod
-          MIXAR_CUDA: '0'
-          MIXAR_CUDA_BINARIES: '0'
-          BUILD_WITH_NINJA: '1'
-        run: call scripts\\windows\\build_ninja.bat
-
-      - name: Upload latest Mixar Windows build
-        uses: actions/upload-artifact@v4
-        with:
-          name: mixar-4.2.3-windows-prod-cpu
-          path: build/Prod/bin/
-          if-no-files-found: error
-          retention-days: 14
-, '#define MIXAR_VERSION_PATCH 3'
-          if ($header -notmatch '#define MIXAR_VERSION_PATCH 3') { throw 'Version patch correction failed' }
           Set-Content -Path $path -Value $header -Encoding utf8
           git rev-parse HEAD
           Get-Content 'VERSION'
