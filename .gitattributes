@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: 2026 aimcrazyxx
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Patches must reach `git apply` byte for byte: never convert their line
+# endings (the Windows runner checks text files out with CRLF).
+patches/** -text

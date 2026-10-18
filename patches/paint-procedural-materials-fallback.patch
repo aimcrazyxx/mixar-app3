@@ -1,0 +1,406 @@
+# SPDX-FileCopyrightText: 2026 aimcrazyxx
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Stand-in for the private paint/procedural_materials package, which the public
+# Mixar source imports at module scope but does not ship: without it a third of
+# the paint module (the layer stack itself) fails to import. Only adds files, so
+# it stops applying exactly when upstream ships the real package. See the
+# package docstring for what it does and deliberately does not do.
+
+diff --git a/src/scripts/mixar/modules/paint/procedural_materials/__init__.py b/src/scripts/mixar/modules/paint/procedural_materials/__init__.py
+new file mode 100644
+index 0000000..df1284d
+--- /dev/null
++++ b/src/scripts/mixar/modules/paint/procedural_materials/__init__.py
+@@ -0,0 +1,19 @@
++# SPDX-FileCopyrightText: 2026 aimcrazyxx
++# SPDX-License-Identifier: GPL-3.0-or-later
++
++"""Procedural materials: stand-in for the package missing from the public source.
++
++Mixar's own ``paint/procedural_materials`` (the backend MatGen library client,
++the sandbox that runs its generated node-group scripts, and the MatGen queue)
++is private, yet a third of the paint module imports it at module scope, so
++without it the layer stack cannot register at all. This fallback keeps the
++same import surface and the standard layers working:
++
++- materials are only those registered at runtime; none are downloaded;
++- a material's script is never executed; only a node group the caller names
++  explicitly, already in the file, is resolved;
++- the backend library reports ``failed`` and MatGen raises, so procedural
++  layers fail closed through their existing error paths.
++"""
++
++PUBLIC_SOURCE_FALLBACK = True
+diff --git a/src/scripts/mixar/modules/paint/procedural_materials/material_registry.py b/src/scripts/mixar/modules/paint/procedural_materials/material_registry.py
+new file mode 100644
+index 0000000..8662778
+--- /dev/null
++++ b/src/scripts/mixar/modules/paint/procedural_materials/material_registry.py
+@@ -0,0 +1,136 @@
++# SPDX-FileCopyrightText: 2026 aimcrazyxx
++# SPDX-License-Identifier: GPL-3.0-or-later
++
++"""Procedural materials known to this session (public-source fallback).
++
++The surface the paint module uses from the private registry. Materials come
++only from callers - the layered build registers its detail layers - and their
++scripts are never run (see the package docstring), so a node group resolves
++only when the material names one that already exists in the file.
++"""
++
++from dataclasses import dataclass
++from typing import Dict, List, Optional
++
++import bpy
++
++from ....config.logging_config import get_logger
++from . import server_catalog
++
++logger = get_logger(__name__)
++
++# The layer type every procedural material layer carries (its material id
++# lives in layer.procedural_material_id).
++PROCEDURAL_LAYER_TYPE = "PROCEDURAL"
++LOCAL_SOURCE = "local"
++
++
++@dataclass
++class ProceduralMaterial:
++    material_id: str
++    name: str
++    category: str = "uncategorized"
++    script: str = ""
++    script_path: str = ""
++    # Explicit only: guessing from the display name could bind an unrelated
++    # node group of the user's file as the layer source.
++    node_group_name: str = ""
++    source: str = LOCAL_SOURCE
++
++
++class MaterialRegistry:
++    def __init__(self):
++        self._materials: Dict[str, ProceduralMaterial] = {}
++        self._warned_unbuilt = set()
++
++    def register_material(self, material: ProceduralMaterial) -> None:
++        self._materials[material.material_id] = material
++
++    def unregister_material(self, material_id: str) -> None:
++        self._materials.pop(material_id, None)
++
++    def get_material(self, material_id: str) -> Optional[ProceduralMaterial]:
++        return self._materials.get(material_id) if material_id else None
++
++    def get_all_materials(self) -> List[ProceduralMaterial]:
++        return list(self._materials.values())
++
++    def get_categories(self) -> List[str]:
++        return sorted({material.category for material in self._materials.values()})
++
++    def get_materials_by_category(self, category: str) -> List[ProceduralMaterial]:
++        return [material for material in self._materials.values() if material.category == category]
++
++    def get_node_group(self, material_id: str):
++        material = self.get_material(material_id)
++        if material is None:
++            return None
++        node_group = (bpy.data.node_groups.get(material.node_group_name)
++                      if material.node_group_name else None)
++        if node_group is None and material_id not in self._warned_unbuilt:
++            self._warned_unbuilt.add(material_id)
++            logger.warning(
++                "Procedural material %r has no node group: material scripts only run "
++                "in Mixar's official builds", material_id,
++            )
++        return node_group
++
++    def clear(self) -> None:
++        self._materials.clear()
++        self._warned_unbuilt.clear()
++
++
++_registry = MaterialRegistry()
++
++
++def get_registry() -> MaterialRegistry:
++    return _registry
++
++
++def register_material(material: ProceduralMaterial) -> None:
++    _registry.register_material(material)
++
++
++def get_material(material_id: str) -> Optional[ProceduralMaterial]:
++    return _registry.get_material(material_id)
++
++
++def get_all_materials() -> List[ProceduralMaterial]:
++    return _registry.get_all_materials()
++
++
++def get_categories() -> List[str]:
++    return _registry.get_categories()
++
++
++def get_materials_by_category(category: str) -> List[ProceduralMaterial]:
++    return _registry.get_materials_by_category(category)
++
++
++def get_node_group(material_id: str):
++    return _registry.get_node_group(material_id)
++
++
++def get_node_group_blocking(material_id: str):
++    """Same as get_node_group: there is no script download to wait for."""
++    return _registry.get_node_group(material_id)
++
++
++def is_custom_material(layer_type: str) -> bool:
++    """True for a procedural layer: its layer type, or a registered material id."""
++    if not layer_type:
++        return False
++    return layer_type == PROCEDURAL_LAYER_TYPE or _registry.get_material(layer_type) is not None
++
++
++def load_server_catalog() -> None:
++    server_catalog.load_server_catalog()
++
++
++def load_matgen_materials() -> None:
++    """The user's generated materials come from MatGen, which this build lacks."""
++
++
++def unload_all_materials() -> None:
++    _registry.clear()
++    server_catalog.reset_server_catalog()
+diff --git a/src/scripts/mixar/modules/paint/procedural_materials/matgen_client.py b/src/scripts/mixar/modules/paint/procedural_materials/matgen_client.py
+new file mode 100644
+index 0000000..952679a
+--- /dev/null
++++ b/src/scripts/mixar/modules/paint/procedural_materials/matgen_client.py
+@@ -0,0 +1,15 @@
++# SPDX-FileCopyrightText: 2026 aimcrazyxx
++# SPDX-License-Identifier: GPL-3.0-or-later
++
++"""MatGen HTTP helpers (public-source fallback).
++
++There is no MatGen client here; this keeps the one contract the rest of the
++code relies on - direct backend requests carry the client version header -
++for anything that builds such a request.
++"""
++
++from ...common.api.client_version import client_version_headers
++
++
++def _auth_headers(token: str) -> dict:
++    return {"Authorization": f"Bearer {token}", **client_version_headers()}
+diff --git a/src/scripts/mixar/modules/paint/procedural_materials/matgen_queue.py b/src/scripts/mixar/modules/paint/procedural_materials/matgen_queue.py
+new file mode 100644
+index 0000000..fd0d21d
+--- /dev/null
++++ b/src/scripts/mixar/modules/paint/procedural_materials/matgen_queue.py
+@@ -0,0 +1,22 @@
++# SPDX-FileCopyrightText: 2026 aimcrazyxx
++# SPDX-License-Identifier: GPL-3.0-or-later
++
++"""AI material generation (MatGen) queue (public-source fallback).
++
++MatGen's client is private to Mixar. Every caller already turns an exception
++from enqueue_matgen_job into a user-facing error (or an agent tool error), so
++raising is how this build says the feature is missing.
++"""
++
++MATGEN_UNAVAILABLE_MSG = (
++    "AI material generation (MatGen) is not available in builds made from the "
++    "public Mixar source."
++)
++
++
++class MatGenUnavailableError(RuntimeError):
++    pass
++
++
++def enqueue_matgen_job(prompt: str = "", pipeline: str = "fast", **_options):
++    raise MatGenUnavailableError(MATGEN_UNAVAILABLE_MSG)
+diff --git a/src/scripts/mixar/modules/paint/procedural_materials/server_catalog.py b/src/scripts/mixar/modules/paint/procedural_materials/server_catalog.py
+new file mode 100644
+index 0000000..ebf4c68
+--- /dev/null
++++ b/src/scripts/mixar/modules/paint/procedural_materials/server_catalog.py
+@@ -0,0 +1,54 @@
++# SPDX-FileCopyrightText: 2026 aimcrazyxx
++# SPDX-License-Identifier: GPL-3.0-or-later
++
++"""Backend procedural material library status (public-source fallback).
++
++The library is downloaded by Mixar's private MatGen client, which the public
++source does not ship, so every request reports FAILED - the status callers
++already treat as "library unavailable" - and nothing is ever fetched.
++"""
++
++from ....config.logging_config import get_logger
++
++logger = get_logger(__name__)
++
++IDLE = "idle"
++LOADING = "loading"
++LOADED = "loaded"
++FAILED = "failed"
++SERVER_SOURCE = "server"
++
++_reported = False
++
++
++def _report_unavailable() -> None:
++    global _reported
++    if not _reported:
++        _reported = True
++        logger.info("Procedural material library unavailable: its backend client "
++                    "is not part of the public Mixar source")
++
++
++def catalog_status() -> str:
++    return FAILED
++
++
++def ensure_server_catalog() -> str:
++    _report_unavailable()
++    return FAILED
++
++
++def load_server_catalog() -> None:
++    _report_unavailable()
++
++
++def reset_server_catalog() -> None:
++    """Nothing is cached."""
++
++
++def is_server_material(material) -> bool:
++    return getattr(material, "source", "") == SERVER_SOURCE
++
++
++def is_script_available(material_id: str) -> bool:
++    return False
+diff --git a/tests/test_procedural_materials_fallback.py b/tests/test_procedural_materials_fallback.py
+new file mode 100644
+index 0000000..d0ef335
+--- /dev/null
++++ b/tests/test_procedural_materials_fallback.py
+@@ -0,0 +1,115 @@
++# SPDX-FileCopyrightText: 2026 aimcrazyxx
++# SPDX-License-Identifier: GPL-3.0-or-later
++
++"""The public-source stand-in for the private paint/procedural_materials
++package: the paint module imports again, standard layer types stay standard,
++procedural layers fail closed, and no material script ever runs."""
++
++import sys
++from pathlib import Path
++from types import SimpleNamespace
++
++import pytest
++
++ROOT = Path(__file__).resolve().parents[1]
++SCRIPTS = ROOT / "src" / "scripts"
++if str(SCRIPTS) not in sys.path:
++    sys.path.insert(0, str(SCRIPTS))
++
++from mixar.modules.testing.mock_bpy import install_bpy_mock  # noqa: E402
++
++install_bpy_mock()
++
++from mixar.modules.paint import procedural_materials  # noqa: E402
++from mixar.modules.paint.procedural_materials import (  # noqa: E402
++    material_registry as MR,
++    matgen_queue,
++    server_catalog as SC,
++)
++
++
++@pytest.fixture(autouse=True)
++def _empty_registry():
++    MR.unload_all_materials()
++    yield
++    MR.unload_all_materials()
++
++
++def test_is_the_public_source_fallback():
++    assert procedural_materials.PUBLIC_SOURCE_FALLBACK is True
++
++
++@pytest.mark.parametrize("module", [
++    "mixar.modules.paint.core.element.modifier_utils",
++    "mixar.modules.paint.core.io.utils.source_connections",
++    "mixar.modules.paint.core.io.utils.depth_connections",
++    "mixar.modules.paint.layered_build.procedural_layer",
++    "mixar.modules.paint.core.agent_tools.material_library",
++    "mixar.modules.auth.core.auth_hooks",
++])
++def test_modules_importing_the_package_load(module):
++    __import__(module)
++
++
++def test_standard_layer_types_are_not_custom():
++    for layer_type in ("IMAGE", "COLOR", "NOISE", "VCOL", "GROUP", "", None):
++        assert MR.is_custom_material(layer_type) is False
++
++
++def test_procedural_layers_and_registered_ids_are_custom():
++    assert MR.is_custom_material("PROCEDURAL") is True
++    MR.get_registry().register_material(MR.ProceduralMaterial(
++        material_id="rust_01", name="Rust", category="metal"))
++    assert MR.is_custom_material("rust_01") is True
++    assert MR.get_material("rust_01").name == "Rust"
++    assert MR.get_categories() == ["metal"]
++    assert [m.material_id for m in MR.get_materials_by_category("metal")] == ["rust_01"]
++
++
++def test_a_material_script_is_never_executed(monkeypatch):
++    lookups = []
++    monkeypatch.setattr(MR.bpy.data, "node_groups",
++                        SimpleNamespace(get=lambda name: lookups.append(name)), raising=False)
++    MR.register_material(MR.ProceduralMaterial(
++        material_id="detail", name="Detail", category="layered_material",
++        script="raise SystemExit('a material script ran')"))
++    assert MR.get_node_group("detail") is None
++    assert MR.get_node_group_blocking("detail") is None
++    assert MR.get_node_group("unknown") is None
++    assert lookups == []  # no implicit by-name lookup either
++
++
++def test_an_explicit_node_group_already_in_the_file_resolves(monkeypatch):
++    group = object()
++    monkeypatch.setattr(MR.bpy.data, "node_groups",
++                        SimpleNamespace(get={"MP Rust": group}.get), raising=False)
++    MR.register_material(MR.ProceduralMaterial(
++        material_id="rust_01", name="Rust", node_group_name="MP Rust"))
++    assert MR.get_node_group("rust_01") is group
++
++
++def test_backend_library_reports_unavailable():
++    assert SC.ensure_server_catalog() == SC.FAILED
++    assert SC.catalog_status() == SC.FAILED
++    assert SC.is_script_available("rust_01") is False
++    assert SC.is_server_material(SimpleNamespace(source=SC.SERVER_SOURCE)) is True
++    assert SC.is_server_material(MR.ProceduralMaterial(material_id="m", name="M")) is False
++
++
++def test_agent_listing_keeps_local_materials_and_the_failed_status(monkeypatch):
++    from mixar.modules.paint.core.agent_tools import material_library as ML
++
++    monkeypatch.setattr(ML.bpy.data, "node_groups", SimpleNamespace(get=lambda name: None), raising=False)
++    MR.register_material(MR.ProceduralMaterial(
++        material_id="detail", name="Detail", category="layered_material", script="# s"))
++    result = ML.list_procedural_materials()
++    assert result["success"] is True
++    assert result["catalog_status"] == SC.FAILED
++    assert [m["material_id"] for m in result["materials"]] == ["detail"]
++    assert result["materials"][0]["source"] == "local"
++
++
++def test_matgen_fails_with_a_clear_error():
++    with pytest.raises(matgen_queue.MatGenUnavailableError, match="public Mixar source"):
++        matgen_queue.enqueue_matgen_job(prompt="rusty metal", pipeline="fast",
++                                        apply_to_object_names=["Cube"])
