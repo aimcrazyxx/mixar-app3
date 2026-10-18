@@ -9,17 +9,24 @@ provider's own API, so a key from another endpoint is rejected. The Local
 provider works differently: the server sends every model call back through
 the app, which makes it - but only to a server on this computer or the local
 network. This script is that server: it listens on 127.0.0.1 and forwards to
-the API you give it.
+the API you give it. Mixar's save only checks that <base>/models answers
+within 3 s, which a long model list can miss (9router takes ~11 s), so the
+script answers that check itself.
 
     python mixar_forward.py https://api.example.com/v1 [--port 4000]
 
 It asks for the API key without echoing it (Enter alone forwards the key
-typed in Mixar's Local form instead) and keeps it in memory only. Then, in
+typed in Mixar's Local form instead) and keeps it in memory only; --no-key
+skips the question, e.g. for a server on this computer that needs none. Then, in
 Mixar's AI Provider dialog: Local, custom server, Base URL
-http://127.0.0.1:4000/v1, model = the API's model ID.
+http://127.0.0.1:4000/v1, model = the API's model ID. Always 127.0.0.1, never
+localhost: Mixar's relay uses only the first address a name resolves to, and
+for localhost that is usually ::1, where this script isn't listening.
 
-Standard library only, so the Python inside Mixar runs it:
-<Mixar folder>\\5.2\\python\\bin\\python.exe mixar_forward.py ...
+Standard library only, so the Python inside Mixar runs it. Use -I (isolated
+mode), so that no file next to the script, user site-packages or PYTHON*
+variable changes what it imports:
+<Mixar folder>\\5.2\\python\\bin\\python.exe -I mixar_forward.py ...
 """
 
 import argparse
@@ -34,6 +41,14 @@ import urllib.request
 UPSTREAM_TIMEOUT_S = 300
 # Mixar's relay sends only these; anything else never reaches us.
 FORWARDED_HEADERS = ("Content-Type", "Accept")
+# Cloudflare-fronted APIs refuse urllib's default User-Agent (error 1010).
+USER_AGENT = "mixar-forward/1.0"
+
+
+class Server(http.server.ThreadingHTTPServer):
+    # On Windows SO_REUSEADDR lets a second copy share the port silently;
+    # without it a second start fails with "address in use" instead.
+    allow_reuse_address = sys.platform != "win32"
 
 
 def make_handler(upstream, key):
@@ -51,10 +66,16 @@ def make_handler(upstream, key):
             if not self.path.startswith("/v1/"):
                 self._reply(404, b'{"error": {"message": "not found"}}')
                 return
+            if self.path == "/v1/models":
+                # Only Mixar's save check calls this, and it needs any answer
+                # within 3 s, not the upstream's list.
+                self._reply(200, b'{"object": "list", "data": []}')
+                return
             body = None
             if method == "POST":
                 body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
             request = urllib.request.Request(upstream + self.path[len("/v1"):], data=body, method=method)
+            request.add_header("User-Agent", USER_AGENT)
             authorization = f"Bearer {key}" if key else self.headers.get("Authorization")
             if authorization:
                 request.add_header("Authorization", authorization)
@@ -90,12 +111,16 @@ def main():
     parser = argparse.ArgumentParser(description="Forward Mixar's Local AI provider to an OpenAI-compatible API.")
     parser.add_argument("upstream", help="API base URL, e.g. https://api.example.com/v1")
     parser.add_argument("--port", type=int, default=4000, help="local port (default 4000)")
+    parser.add_argument("--no-key", action="store_true", help="don't ask for a key; forward the one typed in Mixar, if any")
     args = parser.parse_args()
     upstream = args.upstream.rstrip("/")
-    key = getpass.getpass("API key (Enter = use the key typed in Mixar): ").strip()
+    key = "" if args.no_key else getpass.getpass("API key (Enter = use the key typed in Mixar): ").strip()
 
     # 127.0.0.1 only: nothing else on the network can use the key.
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(upstream, key))
+    try:
+        server = Server(("127.0.0.1", args.port), make_handler(upstream, key))
+    except OSError as error:
+        sys.exit(f"Can't listen on 127.0.0.1:{args.port} ({error}). Is another copy already running?")
     print(f"Forwarding to {upstream}")
     print(f"In Mixar: AI Provider > Local > Base URL http://127.0.0.1:{args.port}/v1  (Ctrl+C stops)")
     try:
