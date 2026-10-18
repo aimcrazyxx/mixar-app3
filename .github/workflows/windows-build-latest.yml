@@ -98,8 +98,23 @@ jobs:
           # the app's runtime packages, so install exactly what the app bundles.
           python -m pip install pytest -r scripts/python_requirements.txt
           if ($LASTEXITCODE -ne 0) { throw 'Test dependency installation failed' }
-          $tests = @(Get-ChildItem tests/test_byok*.py | ForEach-Object { $_.FullName })
-          $tests += 'tests/test_modal_dialog_hides_docks.py'
+          # The suites of the modules the patches change (byok client, state,
+          # operators, dialog, props; the 500-line rule; the paint fallback).
+          # Not all of test_byok*: upstream's codex_auth and models_cache
+          # suites assume POSIX paths and file modes and fail on Windows
+          # whether or not anything is patched.
+          $tests = @(@(
+            'tests/test_byok_api_key.py',
+            'tests/test_byok_custom_endpoint.py',
+            'tests/test_byok_dialog_ui.py',
+            'tests/test_byok_key_store.py',
+            'tests/test_byok_provider_sheet.py',
+            'tests/test_byok_request_lifecycle.py',
+            'tests/test_byok_state_refresh.py',
+            'tests/test_byok_transport_stale_retry.py',
+            'tests/test_byok_turn_credentials.py',
+            'tests/test_modal_dialog_hides_docks.py'
+          ) | Where-Object { Test-Path $_ })
           if (Test-Path 'tests/test_procedural_materials_fallback.py') { $tests += 'tests/test_procedural_materials_fallback.py' }
           python -m pytest -q -p no:cacheprovider @tests
           if ($LASTEXITCODE -ne 0) { throw 'Patched-module tests failed' }
