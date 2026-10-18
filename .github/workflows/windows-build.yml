@@ -48,6 +48,28 @@ jobs:
           $url = "https://raw.githubusercontent.com/aimcrazyxx/mixar-app3/main/src/scripts/mixar/modules/auth/core/device.py"
           Invoke-WebRequest -Uri $url -OutFile "src/scripts/mixar/modules/auth/core/device.py"
 
+      - name: Apply custom BYOK endpoint overlay
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $url = 'https://raw.githubusercontent.com/aimcrazyxx/mixar-app3/21313bf3b2168217dd9f2b3c4f216d0e058c7db5/patches/byok-4.3.2.patch'
+          $patch = Join-Path $env:RUNNER_TEMP 'byok-4.3.2.patch'
+          Invoke-WebRequest -Uri $url -OutFile $patch
+          git apply --check $patch
+          if ($LASTEXITCODE -ne 0) { throw 'BYOK patch does not match upstream v4.3.2' }
+          git apply $patch
+          if ($LASTEXITCODE -ne 0) { throw 'Could not apply BYOK patch' }
+
+      - name: Verify custom BYOK
+        shell: pwsh
+        run: |
+          python -m pip install pytest requests
+          if ($LASTEXITCODE -ne 0) { throw 'Test dependency installation failed' }
+          python -m compileall -q src/scripts/mixar/modules/byok
+          if ($LASTEXITCODE -ne 0) { throw 'BYOK compilation failed' }
+          python -m pytest -q tests/test_byok_custom_endpoint.py tests/test_byok_request_lifecycle.py tests/test_byok_turn_credentials.py tests/test_byok_key_store.py tests/test_byok_provider_sheet.py tests/test_byok_state_refresh.py tests/test_byok_api_key.py
+          if ($LASTEXITCODE -ne 0) { throw 'BYOK tests failed' }
+
       - name: Disable OneAPI for CPU runner
         shell: pwsh
         run: |
@@ -74,7 +96,7 @@ jobs:
       - name: Upload latest Mixar Windows build
         uses: actions/upload-artifact@v4
         with:
-          name: mixar-4.3.2-windows-prod-cpu
+          name: mixar-4.3.2-windows-prod-cpu-byok
           path: build/Prod/bin/
           if-no-files-found: error
           retention-days: 14
