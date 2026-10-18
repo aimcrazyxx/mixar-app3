@@ -16,10 +16,11 @@ on:
         description: "Official Mixar branch or tag (main = newest)"
         default: main
         required: true
-  pull_request:
+  # push, not pull_request: a pull_request paths filter matches the whole PR
+  # diff, so every push to a PR that touches patches/ restarted the build.
+  push:
     paths:
       - "patches/**"
-      - ".github/workflows/windows-build-latest.yml"
 
 concurrency:
   group: windows-build-latest-${{ github.ref }}
