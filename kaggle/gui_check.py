@@ -8,12 +8,16 @@
 Waits for the bootstrap's deferred UI loading (it only runs from timers, so
 the background-mode smoke test never reaches it), records every warning and
 error Mixar logs on the way, checks that the paint layer stack registered,
-saves a screenshot and quits. The verdict goes to gui_check.json.
+saves a screenshot and quits. The verdict goes to gui_check.json: UI loading
+finished, the layer stack exists, and the bootstrap logged no error while
+registering UI modules. Other errors are listed but do not fail the check:
+headless, the app runs without a real sign-in.
 """
 
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import time
@@ -21,6 +25,8 @@ import time
 import bpy
 
 OUT_DIR = os.environ.get("MIXAR_GUI_CHECK_OUT", ".")
+# How the bootstrap and the UI packages report a module they could not load.
+UI_FAILURE = re.compile(r"failed to (import|load|register)|error registering|failed on retry", re.I)
 TIMEOUT_S = float(os.environ.get("MIXAR_GUI_CHECK_TIMEOUT", "300"))
 _started = time.monotonic()
 _records = []
@@ -39,8 +45,10 @@ logging.Logger.callHandlers = _record
 
 
 def _paint_registered():
-    return bool(bpy.types.ShaderNodeTree.bl_rna.properties.get("mp")
-                and getattr(bpy.types, "MLayer", None))
+    """The layered paint stack: ShaderNodeTree.mp (MPaint) and its layers."""
+    mp = bpy.types.ShaderNodeTree.bl_rna.properties.get("mp")
+    stack = getattr(mp, "fixed_type", None)
+    return bool(stack and stack.properties.get("layers"))
 
 
 def _screenshot():
@@ -64,13 +72,17 @@ def _screenshot():
 def _finish():
     boot = sys.modules.get("bootstrap")
     complete = bool(boot and getattr(boot, "_ui_loading_complete", False))
-    ui_errors = [r for r in _records if r["level"] in ("ERROR", "CRITICAL")]
+    errors = [r for r in _records if r["level"] in ("ERROR", "CRITICAL")]
+    # The bootstrap (and packages that load their own UI files) log every
+    # UI module they fail to load or register.
+    ui_errors = [r for r in errors if r["logger"] == "bootstrap" or UI_FAILURE.search(r["message"])]
     result = {
         "ui_loading_complete": complete,
         "ui_modules_registered": len(getattr(boot, "_loaded_ui_modules", ()) or ()),
         "paint_layer_stack_registered": _paint_registered(),
         "seconds": round(time.monotonic() - _started, 1),
         "errors": ui_errors,
+        "other_errors": [r for r in errors if r not in ui_errors],
         "warnings": [r for r in _records if r["level"] == "WARNING"],
     }
     result["ok"] = complete and result["paint_layer_stack_registered"] and not ui_errors
@@ -80,10 +92,13 @@ def _finish():
         json.dump(result, f, indent=2)
     print(f"GUI ok={result['ok']} ui_complete={complete} "
           f"ui_modules={result['ui_modules_registered']} "
-          f"paint={result['paint_layer_stack_registered']} errors={len(ui_errors)} "
-          f"warnings={len(result['warnings'])} after {result['seconds']}s")
+          f"paint={result['paint_layer_stack_registered']} ui_errors={len(ui_errors)} "
+          f"other_errors={len(result['other_errors'])} warnings={len(result['warnings'])} "
+          f"after {result['seconds']}s")
     for record in ui_errors[:30]:
         print(f"GUI ERROR {record['logger']}: {record['message']}")
+    for record in result["other_errors"][:10]:
+        print(f"GUI note {record['logger']}: {record['message']}")
     with bpy.context.temp_override(window=window):
         bpy.ops.wm.quit_blender()
 

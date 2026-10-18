@@ -210,13 +210,18 @@ fetch_blender() {
         rm -rf "$libs"
     fi
     fetch_pinned "$libs" "$LIBS_GIT" "$LIBS_SHA"
-    if [[ "$(cat "$libs/.mixar-lfs-done" 2>/dev/null || true)" != "$LIBS_SHA" ]]; then
+    local lfs_done="$LIBS_SHA sycl-runtime"
+    if [[ "$(cat "$libs/.mixar-lfs-done" 2>/dev/null || true)" != "$lfs_done" ]]; then
         # dpcpp is the 800 MB oneAPI compiler, only used by the Intel GPU
-        # kernels this build leaves off. Its pointer files must go too: CMake
-        # globs dpcpp/lib/libsycl*.so into the bundle whether oneAPI is on or not.
+        # kernels this build leaves off - but its SYCL runtime is not optional:
+        # libembree4.so and OIDN's SYCL device need libsycl.so.8 at load time,
+        # whether oneAPI is on or not. Pull just the runtime (~25 MB), which
+        # CMake bundles into lib/ (dpcpp/lib/libsycl.so*, libur_*).
+        git -C "$libs" checkout -q -- dpcpp
         git -C "$libs" lfs pull --exclude="dpcpp/**"
-        rm -rf "$libs/dpcpp" "$libs/.git/lfs/objects"
-        echo "$LIBS_SHA" > "$libs/.mixar-lfs-done"
+        git -C "$libs" lfs pull --include="dpcpp/lib/libsycl.so*,dpcpp/lib/libur_*,dpcpp/lib/libpi_*"
+        rm -rf "$libs/.git/lfs/objects"
+        echo "$lfs_done" > "$libs/.mixar-lfs-done"
     fi
     rm -rf "$up/lib/linux_x64"
     ln -s "$libs" "$up/lib/linux_x64"
@@ -279,6 +284,12 @@ smoke_test() {
     timeout 900 "$BIN_DIR/mixar" -b --factory-startup --python-exit-code 3 \
         --python "$SCRIPT_DIR/smoke_test.py" > "$LOG_DIR/smoke_test.log" 2>&1 || rc=$?
     grep -E '^(SMOKE|  FAIL)' "$LOG_DIR/smoke_test.log" || true
+    # Import failures are reported; an app that cannot even start (a missing
+    # shared library exits 127) is not worth packaging.
+    if ! grep -q '^SMOKE Blender' "$LOG_DIR/smoke_test.log"; then
+        head -n 20 "$LOG_DIR/smoke_test.log"
+        die "the built app does not start (exit $rc); see logs/smoke_test.log"
+    fi
     if (( rc != 0 )); then
         SMOKE_RESULT="failed (exit $rc, see logs/smoke_test.log)"
         echo "Smoke test $SMOKE_RESULT; packaging anyway"
@@ -294,9 +305,13 @@ gui_check() {
         return 0
     fi
     step "GUI check (virtual display: deferred UI registration + screenshot)"
+    # Release builds wait for a stored sign-in token before opening any UI;
+    # the shim answers that one lookup with a placeholder (see its header).
+    local shim="$WORK_DIR/gui_check_keyring_shim.so"
+    "$CC" -shared -fPIC -O2 -o "$shim" "$SCRIPT_DIR/gui_check_keyring_shim.c"
     local rc=0
     MIXAR_GUI_CHECK_OUT="$LOG_DIR" timeout 600 xvfb-run -a -s "-screen 0 1600x900x24" \
-        "$BIN_DIR/mixar" --factory-startup --python "$SCRIPT_DIR/gui_check.py" \
+        env LD_PRELOAD="$shim" "$BIN_DIR/mixar" --factory-startup --python "$SCRIPT_DIR/gui_check.py" \
         > "$LOG_DIR/gui_check.log" 2>&1 || rc=$?
     grep -E '^GUI ' "$LOG_DIR/gui_check.log" || true
     if [[ -f "$LOG_DIR/gui_check.json" ]] && python3 -c \
@@ -317,6 +332,8 @@ package() {
     rm -rf "$stage_root"
     mkdir -p "$stage_root"
     cp -al "$BIN_DIR" "$stage_root/$name"   # hard links: no second 2 GB copy
+    # Build-time generators CMake leaves next to the app; releases omit them.
+    (cd "$stage_root/$name" && rm -f datatoc makesdna makesrna msgfmt shader_tool zstd_compress)
     {
         echo "Mixar $MIXAR_VERSION for Linux x86_64 (built from public source)"
         echo "Built:     $(date -u +%Y-%m-%dT%H:%M:%SZ)$( (( ON_KAGGLE )) && echo ' on Kaggle')"

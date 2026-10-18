@@ -12,7 +12,8 @@ O script faz tudo sozinho:
 
 1. instala o toolchain no Ubuntu 24.04 (GCC 14, que o Blender 5.2 exige, CMake, Ninja, Git LFS e as bibliotecas de X11/Wayland, áudio, libcurl, OpenSSL e libsecret);
 2. baixa o Mixar (`MIXAR_REF`), aplica os patches e valida que cada um ainda encaixa;
-3. baixa o Blender no commit fixado pelo Mixar e as bibliotecas pré-compiladas desse commit (sem o `dpcpp` de 800 MB, só usado pela GPU Intel);
+3. baixa o Blender no commit fixado pelo Mixar e as bibliotecas pré-compiladas desse commit (do
+   `dpcpp`, o compilador oneAPI de 800 MB, só o runtime SYCL de ~25 MB, que o Embree exige);
 4. roda o `scripts/unix/build.sh` oficial com Ninja, mostrando o progresso a cada 1%;
 5. abre o app em modo headless e importa todos os módulos Python do Mixar (teste de fumaça);
 6. abre o app com interface num display virtual (Xvfb + OpenGL por software), espera o Mixar
