@@ -1,0 +1,342 @@
+# SPDX-FileCopyrightText: 2026 aimcrazyxx
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+diff --git a/src/scripts/mixar/modules/byok/core/byok_client.py b/src/scripts/mixar/modules/byok/core/byok_client.py
+index 1da5fb2..4181ffc 100644
+--- a/src/scripts/mixar/modules/byok/core/byok_client.py
++++ b/src/scripts/mixar/modules/byok/core/byok_client.py
+@@ -314,6 +314,14 @@ def save_credentials(
+     A local ``model`` that is a path is sent as its basename. Counted in
+     flight until the callback (`mutation_in_flight`).
+     """
++    if provider != LOCAL_PROVIDER_ID and base_url:
++        from .custom_endpoint import normalize_base_url
++        try:
++            base_url = normalize_base_url(base_url)
++        except ValueError as exc:
++            on_done(False, None, str(exc))
++            return
++
+     if provider == LOCAL_PROVIDER_ID:
+         from mixar.modules.local_models.core.model_name import safe_model_name
+         model = safe_model_name(model)
+@@ -326,7 +334,16 @@ def save_credentials(
+         user_id = key_store.current_user_id()  # before the call: never the next account's
+         success, data, err = _put_sealed(provider, model, api_key, base_url,
+                                          supports_vision, account_id)
+-        if success and not _store_local_key(provider, api_key, codex_auth_path, model, user_id):
++        if success and base_url and provider != LOCAL_PROVIDER_ID:
++            # Never claim a custom endpoint is active if an older backend
++            # silently ignores base_url and falls back to the standard host.
++            from .custom_endpoint import endpoint_confirmed
++            if not endpoint_confirmed(data, base_url):
++                return False, data, (
++                    "The Mixar server did not confirm your custom Base URL. "
++                    "This endpoint requires server-side custom-provider support."
++                )
++        if success and not _store_local_key(provider, api_key, codex_auth_path, model, user_id, base_url):
+             success, err = False, _LOCAL_STORE_FAILED_MSG
+         return success, data, err
+ 
+@@ -381,7 +398,7 @@ def resave_stored_key(
+         account_id = resolution.fields.get(BYOK_TURN_ACCOUNT_FIELD)
+         if epoch != _account_epoch():
+             return False, None, _SIGNED_OUT_MSG
+-        success, data, err = _put_sealed(provider, target, api_key, None, None, account_id)
++        success, data, err = _put_sealed(provider, target, api_key, record.get("base_url"), None, account_id)
+         if success and not key_store.update({"model": target}, user_id):
+             # The server runs the new model; only a later resume would re-send
+             # the old one. Not an error the user can act on.
+@@ -492,7 +509,7 @@ def forget_stored_key(on_done: Callable[[bool], None]) -> None:
+ # This device's copy of the key (worker thread; the store blocks)
+ # ---------------------------------------------------------------------------
+ 
+-def _store_local_key(provider, api_key, codex_auth_path, model, user_id=None) -> bool:
++def _store_local_key(provider, api_key, codex_auth_path, model, user_id=None, base_url=None) -> bool:
+     """True when the record is in this device's store (Codex: the file
+     reference only — never the tokens), under ``user_id`` (the account the
+     request was made as; None resolves the current token)."""
+@@ -500,6 +517,8 @@ def _store_local_key(provider, api_key, codex_auth_path, model, user_id=None) ->
+         from . import key_store
+ 
+         record = key_store.make_record(provider, api_key, auth_path=codex_auth_path, model=model)
++        if base_url:
++            record["base_url"] = base_url
+         if key_store.save(record, user_id):
+             return True
+         logger.warning("BYOK key was validated but could not be stored on this device")
+diff --git a/src/scripts/mixar/modules/byok/core/credential_state.py b/src/scripts/mixar/modules/byok/core/credential_state.py
+index 9941c88..6db5125 100644
+--- a/src/scripts/mixar/modules/byok/core/credential_state.py
++++ b/src/scripts/mixar/modules/byok/core/credential_state.py
+@@ -36,6 +36,7 @@ _FIELDS = (
+     "byok_is_active",
+     "byok_current_provider",
+     "byok_current_model",
++    "byok_current_base_url",
+     "byok_current_supports_vision",
+     "byok_key_preview",
+     "byok_device_key_missing",
+@@ -46,6 +47,7 @@ _DEFAULTS: Dict[str, Any] = {
+     "byok_is_active": False,
+     "byok_current_provider": "",
+     "byok_current_model": "",
++    "byok_current_base_url": "",
+     # Absent on older backends -> default to vision-capable, so we never show a
+     # false "text-only" note.
+     "byok_current_supports_vision": True,
+@@ -399,6 +401,7 @@ def _parse(data) -> Dict[str, Any]:
+         first = items[0]
+         parsed["byok_current_provider"] = first.get("provider", "") or ""
+         parsed["byok_current_model"] = first.get("model", "") or ""
++        parsed["byok_current_base_url"] = first.get("base_url", "") or ""
+         parsed["byok_current_supports_vision"] = bool(first.get("supports_vision", True))
+         parsed["byok_key_preview"] = first.get("key_preview", "") or ""
+     return parsed
+diff --git a/src/scripts/mixar/modules/byok/core/custom_endpoint.py b/src/scripts/mixar/modules/byok/core/custom_endpoint.py
+new file mode 100644
+index 0000000..7cdce65
+--- /dev/null
++++ b/src/scripts/mixar/modules/byok/core/custom_endpoint.py
+@@ -0,0 +1,35 @@
++# SPDX-FileCopyrightText: 2026 aimcrazyxx
++# SPDX-License-Identifier: GPL-3.0-or-later
++
++"""Validate a user-selected cloud API base without contacting it."""
++from urllib.parse import urlsplit
++
++
++def normalize_base_url(value):
++    value = (value or "").strip().rstrip("/")
++    if not value:
++        return None
++    try:
++        url = urlsplit(value)
++        port = url.port
++    except ValueError:
++        raise ValueError("Enter a valid HTTPS API base URL.") from None
++    if (url.scheme != "https" or not url.hostname or url.username is not None
++            or url.password is not None or url.query or url.fragment
++            or any(c.isspace() for c in value) or any(ord(c) < 32 for c in value)):
++        raise ValueError("Use an HTTPS base URL without credentials, query or fragment.")
++    if url.path.endswith(("/chat/completions", "/responses", "/messages")):
++        raise ValueError("Enter the API base, for example https://api.example.com/v1.")
++    return value
++
++
++def endpoint_confirmed(data, base_url):
++    """Require the server's echo to confirm the selected endpoint."""
++    if not isinstance(data, dict):
++        return False
++    items = data.get("items") or []
++    return bool(items) and all(
++        isinstance(item, dict)
++        and (item.get("base_url") or "").rstrip("/") == base_url.rstrip("/")
++        for item in items
++    )
+diff --git a/src/scripts/mixar/modules/byok/ui/operators/byok_ops.py b/src/scripts/mixar/modules/byok/ui/operators/byok_ops.py
+index 527b8d3..42a405b 100644
+--- a/src/scripts/mixar/modules/byok/ui/operators/byok_ops.py
++++ b/src/scripts/mixar/modules/byok/ui/operators/byok_ops.py
+@@ -259,12 +259,14 @@ class MIXAR_BYOK_OT_save(Operator):
+         if model_suggestions.is_local(provider):
+             return self._execute_local(wm)
+ 
+-        model = wm.byok_form_model
++        base_url = (getattr(wm, 'byok_form_base_url', '') or '').strip()
++        model = ((getattr(wm, 'byok_form_custom_model', '') or '').strip()
++                 if base_url else wm.byok_form_model)
+         api_key = wm.byok_form_api_key.strip()
+ 
+         # Name what is actually missing (a picked model is never asked for again).
+         problem = (n_("Pick a provider.") if provider == 'NONE' else n_("Pick a model.")
+-                   if not model_suggestions.is_valid_model(provider, model)
++                   if not (bool(model) if base_url else model_suggestions.is_valid_model(provider, model))
+                    else n_("Enter your API key.") if not api_key else "")
+         if problem:
+             wm.byok_dialog_state, wm.byok_last_error = 'ERROR', problem
+@@ -279,6 +281,7 @@ class MIXAR_BYOK_OT_save(Operator):
+             provider=provider,
+             model=model,
+             api_key=api_key,
++            base_url=base_url or None,
+             on_done=_save_callback(),
+         )
+         return {'FINISHED'}
+@@ -302,6 +305,7 @@ class MIXAR_BYOK_OT_save(Operator):
+             provider='openrouter',
+             model=model,
+             api_key=api_key,
++            base_url=(getattr(wm, 'byok_form_base_url', '') or '').strip() or None,
+             on_done=_save_callback(),
+         )
+         return {'FINISHED'}
+diff --git a/src/scripts/mixar/modules/byok/ui/operators/byok_provider_settings_ui.py b/src/scripts/mixar/modules/byok/ui/operators/byok_provider_settings_ui.py
+index 07a637f..5886d7b 100644
+--- a/src/scripts/mixar/modules/byok/ui/operators/byok_provider_settings_ui.py
++++ b/src/scripts/mixar/modules/byok/ui/operators/byok_provider_settings_ui.py
+@@ -223,6 +223,9 @@ class FormPlan:
+                        wrap(rpt_(wm.byok_last_error), ERROR_WRAP_CHARS)[:2]]
+         return strips
+ 
++        if self.kind in ('cloud', 'openrouter'):
++            self.need += 2 * (S.NOTE_H + S.FIELD_H + S.GAP)
++
+     # -- build ---------------------------------------------------------------
+ 
+     def build(self, col, geo):
+@@ -244,6 +247,8 @@ class FormPlan:
+             self._chips(area)
+             if self.kind == 'codex':
+                 self._codex_notes(area)
++        if self.kind in ('cloud', 'openrouter'):
++            self._custom_endpoint_fields(area)
+         self._strips(col)
+ 
+         if self.kind == 'local':
+@@ -274,6 +279,21 @@ class FormPlan:
+         return iface_("ALL SUPPORTED {provider} MODELS").format(
+             provider=S.bright(provider_label(self.provider).upper()))
+ 
++    def _custom_endpoint_fields(self, area):
++        S.sep(area, S.GAP)
++        S.label(S.row(area, S.NOTE_H, left=S.PROMPT_INSET),
++                n_("Custom Base URL (optional; HTTPS API base)"), S.NOTE)
++        row = S.row(area, S.FIELD_H, left=S.RIGHT_INSET, right=S.RIGHT_MARGIN)
++        row.enabled = not self.key_only
++        S.input_field(row, self.wm, 'byok_form_base_url')
++        if self.kind == 'cloud':
++            S.sep(area, S.GAP)
++            S.label(S.row(area, S.NOTE_H, left=S.PROMPT_INSET),
++                    n_("Custom model ID (required with a custom Base URL)"), S.NOTE)
++            row = S.row(area, S.FIELD_H, left=S.RIGHT_INSET, right=S.RIGHT_MARGIN)
++            row.enabled = not self.key_only
++            S.input_field(row, self.wm, 'byok_form_custom_model')
++
+     def _chips(self, area):
+         if not self.chips:
+             S.label(S.row(area, S.NOTE_H, left=S.RIGHT_INSET),
+diff --git a/src/scripts/mixar/modules/byok/ui/properties/byok_props.py b/src/scripts/mixar/modules/byok/ui/properties/byok_props.py
+index ecbab1b..007b224 100644
+--- a/src/scripts/mixar/modules/byok/ui/properties/byok_props.py
++++ b/src/scripts/mixar/modules/byok/ui/properties/byok_props.py
+@@ -110,6 +110,12 @@ def _provider_changed(self, context):
+     try:
+         wm = context.window_manager if context is not None else self
+         provider = getattr(wm, 'byok_form_provider', '') or ''
++        wm.byok_form_base_url = ''
++        wm.byok_form_custom_model = ''
++        if getattr(wm, 'byok_current_provider', '') == provider:
++            wm.byok_form_base_url = getattr(wm, 'byok_current_base_url', '')
++            if wm.byok_form_base_url:
++                wm.byok_form_custom_model = getattr(wm, 'byok_current_model', '')
+         items = get_model_items(provider)
+         # Dynamic EnumProperties reject identifiers absent from their current
+         # item callback.  Select the first real model for the new provider, or
+@@ -185,6 +191,8 @@ _WM_ATTRS = (
+     'byok_form_provider_id',
+     'byok_form_model_id',
+     'byok_form_api_key',
++    'byok_form_base_url',
++    'byok_form_custom_model',
+     'byok_form_openrouter_model',
+     'byok_form_codex_path',
+     'byok_form_local_mode',
+@@ -196,6 +204,7 @@ _WM_ATTRS = (
+     'byok_is_active',
+     'byok_current_provider',
+     'byok_current_model',
++    'byok_current_base_url',
+     'byok_current_supports_vision',
+     'byok_key_preview',
+     'byok_device_key_missing',
+@@ -243,6 +252,17 @@ def register():
+         options={'SKIP_SAVE'},
+     )
+ 
++    WM.byok_form_base_url = StringProperty(
++        name="Custom Base URL (optional)",
++        description="HTTPS API base, e.g. https://api.example.com/v1. Empty uses the provider default",
++        default='', maxlen=2048, options={'SKIP_SAVE'},
++    )
++    WM.byok_form_custom_model = StringProperty(
++        name="Custom model ID",
++        description="Exact model ID exposed by your custom API endpoint",
++        default='', maxlen=256, options={'SKIP_SAVE'},
++    )
++
+     # --- OpenRouter form field (shown when provider == 'openrouter'). The key
+     # reuses byok_form_api_key; only the model is free-text and OpenRouter-specific.
+     WM.byok_form_openrouter_model = StringProperty(
+@@ -311,6 +331,7 @@ def register():
+     )
+     WM.byok_current_provider = StringProperty(default='')
+     WM.byok_current_model = StringProperty(default='')
++    WM.byok_current_base_url = StringProperty(default='', options={'SKIP_SAVE'})
+     # Whether the saved model accepts image input. Text-only models (many
+     # OpenRouter models) run chat fine but skip 3D visual feedback, so the
+     # dialog surfaces a note. Defaults True (platform + vision models).
+diff --git a/tests/test_byok_custom_endpoint.py b/tests/test_byok_custom_endpoint.py
+new file mode 100644
+index 0000000..d37f554
+--- /dev/null
++++ b/tests/test_byok_custom_endpoint.py
+@@ -0,0 +1,45 @@
++# SPDX-FileCopyrightText: 2026 aimcrazyxx
++# SPDX-License-Identifier: GPL-3.0-or-later
++import importlib.util
++from pathlib import Path
++import pytest
++
++FILE = Path(__file__).resolve().parents[1] / "src/scripts/mixar/modules/byok/core/custom_endpoint.py"
++spec = importlib.util.spec_from_file_location("custom_endpoint", FILE)
++endpoint = importlib.util.module_from_spec(spec)
++spec.loader.exec_module(endpoint)
++
++
++def test_normalize_preserves_version_prefix():
++    assert endpoint.normalize_base_url(" https://api.example.com/proxy/v1/ ") == "https://api.example.com/proxy/v1"
++    assert endpoint.normalize_base_url("") is None
++
++
++@pytest.mark.parametrize("url", [
++    "http://api.example.com/v1", "https://user:pass@api.example.com/v1",
++    "https://api.example.com/v1?key=secret", "https://api.example.com/v1#x",
++    "https://api.example.com:bad/v1", "https://api.example.com/v1/chat/completions",
++    "https://api.example.com/v1/responses", "https://api.example.com/v1/messages",
++    "https://api.ex ample.com/v1",
++])
++def test_reject_invalid_api_bases(url):
++    with pytest.raises(ValueError):
++        endpoint.normalize_base_url(url)
++
++
++def test_does_not_accept_ignored_base_url():
++    assert not endpoint.endpoint_confirmed({"items": [{"provider": "openai"}]}, "https://api.example.com/v1")
++    assert not endpoint.endpoint_confirmed({"items": []}, "https://api.example.com/v1")
++    assert endpoint.endpoint_confirmed({"items": [{"base_url": "https://api.example.com/v1/"}]}, "https://api.example.com/v1")
++
++
++def test_custom_endpoint_persisted_with_device_key(monkeypatch):
++    from mixar.modules.byok.core import byok_client, key_store
++    saved = []
++    monkeypatch.setattr(key_store, "save", lambda record, user_id: saved.append((record, user_id)) or True)
++    assert byok_client._store_local_key("openai", "test-key", None, "custom-model", "test-user", "https://api.example.com/v1")
++    record, user_id = saved[0]
++    assert record["base_url"] == "https://api.example.com/v1"
++    assert record["key"] == "test-key"
++    assert record["model"] == "custom-model"
++    assert user_id == "test-user"
+diff --git a/tests/test_byok_key_store.py b/tests/test_byok_key_store.py
+index 0612920..e9f20ee 100644
+--- a/tests/test_byok_key_store.py
++++ b/tests/test_byok_key_store.py
+@@ -226,7 +226,7 @@ def test_byok_client_stores_the_key_locally_on_200_and_never_sends_the_refresh_t
+     assert "account_id=account_id," in put_body and "api_key=envelope," in put_body
+     assert "codex_auth_path" not in put_body
+     assert "refresh_token" not in save_body and "refresh_token" not in put_body
+-    assert "if success and not _store_local_key(provider, api_key, codex_auth_path, model, user_id):" in save_body
++    assert "if success and not _store_local_key(provider, api_key, codex_auth_path, model, user_id, base_url):" in save_body
+     assert "success, err = False, _LOCAL_STORE_FAILED_MSG" in save_body
+     delete_body = src[src.index("def delete_credentials("):src.index("def _store_local_key(")]
+     assert "_forget_local_key(user_id)" in delete_body  # the account the request was made as
