@@ -19,10 +19,14 @@ It asks for the API key without echoing it (Enter alone forwards the key
 typed in Mixar's Local form instead) and keeps it in memory only; --no-key
 skips the question, e.g. for a server on this computer that needs none. Then, in
 Mixar's AI Provider dialog: Local, custom server, Base URL
-http://127.0.0.1:4000/v1, model = the API's model ID.
+http://127.0.0.1:4000/v1, model = the API's model ID. Always 127.0.0.1, never
+localhost: Mixar's relay uses only the first address a name resolves to, and
+for localhost that is usually ::1, where this script isn't listening.
 
-Standard library only, so the Python inside Mixar runs it:
-<Mixar folder>\\5.2\\python\\bin\\python.exe mixar_forward.py ...
+Standard library only, so the Python inside Mixar runs it. Use -I (isolated
+mode), so that no file next to the script, user site-packages or PYTHON*
+variable changes what it imports:
+<Mixar folder>\\5.2\\python\\bin\\python.exe -I mixar_forward.py ...
 """
 
 import argparse
