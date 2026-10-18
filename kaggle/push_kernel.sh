@@ -7,7 +7,7 @@
 #   kaggle/push_kernel.sh [--ref BRANCH] [--mixar-ref REF] [--slug NAME] [--wait] [--download DIR]
 #
 #   --ref        branch/tag of THIS repository the notebook clones (default: main)
-#   --mixar-ref  official Mixar ref to build (default: main = newest code)
+#   --mixar-ref  official Mixar ref to build (default: latest-release = newest release)
 #   --slug       Kaggle notebook to push to (default: KAGGLE_KERNEL_SLUG or mixar-linux-build)
 #   --wait       poll until the Kaggle run finishes; exit non-zero if it failed
 #   --download   after --wait, fetch the run's output (tarball, logs) into DIR
@@ -24,7 +24,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP3_REF="main"
-MIXAR_REF="main"
+MIXAR_REF="latest-release"
 WAIT=0
 FORCE=0
 DOWNLOAD=""

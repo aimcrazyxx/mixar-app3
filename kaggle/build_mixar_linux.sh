@@ -9,8 +9,9 @@
 # but runs on any Ubuntu 24.04 host with root or sudo.
 #
 # Every knob is an environment variable:
-#   MIXAR_REF     official Mixar ref to build: main (default, newest code),
-#                 latest-tag (newest vX.Y.Z tag) or any tag/branch/commit
+#   MIXAR_REF     official Mixar ref to build: latest-release (default: the
+#                 newest vX.Y.Z tag or release/vX.Y.Z branch), main (newest
+#                 code), latest-tag or any tag/branch/commit
 #   MIXAR_REPO    official repository URL
 #   MIXAR_ENV     Prod (default) | Dev | UAT
 #   MIXAR_CUDA    0 (default, Cycles renders on CPU) | 1 (needs a CUDA toolkit)
@@ -32,7 +33,7 @@ ON_KAGGLE=0
 [[ -d /kaggle/working ]] && ON_KAGGLE=1
 
 MIXAR_REPO="${MIXAR_REPO:-https://github.com/Mixar-AI/mixar-app.git}"
-MIXAR_REF="${MIXAR_REF:-main}"
+MIXAR_REF="${MIXAR_REF:-latest-release}"
 export MIXAR_ENV="${MIXAR_ENV:-Prod}"
 export MIXAR_CUDA="${MIXAR_CUDA:-0}"
 PATCH_SERIES="${PATCH_SERIES:-$REPO_ROOT/patches/series}"
@@ -123,6 +124,14 @@ resolve_mixar_ref() {
         MIXAR_REF="$(git ls-remote --tags --refs "$MIXAR_REPO" 'v*' \
             | sed 's#.*refs/tags/##' | grep -E '^v[0-9]+(\.[0-9]+)*$' | sort -V | tail -n1)"
         [[ -n "$MIXAR_REF" ]] || die "no release tag found in $MIXAR_REPO"
+    elif [[ "$MIXAR_REF" == "latest-release" ]]; then
+        # Mixar does not tag every release (4.3.3 only has release/v4.3.3), so
+        # look at both; when a version has both, the tag wins.
+        MIXAR_REF="$(git ls-remote --refs "$MIXAR_REPO" 'refs/tags/v*' 'refs/heads/release/v*' \
+            | sed -E 's#.*refs/(tags|heads)/##' | grep -E '^(release/)?v[0-9]+\.[0-9]+\.[0-9]+$' \
+            | awk '{ v = $0; sub(/^release\//, "", v); print v, ($0 ~ /^release/), $0 }' \
+            | sort -k1,1V -k2,2nr | tail -n1 | cut -d' ' -f3)"
+        [[ -n "$MIXAR_REF" ]] || die "no release tag or branch found in $MIXAR_REPO"
     fi
     echo "Mixar ref: $MIXAR_REF"
 }
@@ -141,6 +150,25 @@ fetch_mixar() {
     MIXAR_COMMIT="$(git -C "$MIXAR_DIR" rev-parse HEAD)"
     MIXAR_VERSION="$(tr -d '[:space:]' < "$MIXAR_DIR/VERSION")"
     echo "Mixar $MIXAR_VERSION at ${MIXAR_COMMIT:0:12}: $(git -C "$MIXAR_DIR" log -1 --format='%s (%cs)')"
+}
+
+# Mixar's releases carry the previous release's number in VERSION and
+# BKE_blender_version.h (v4.3.4 says 4.3.3, release/v4.3.3 says 4.3.2). The
+# app compares that number with the newest release to offer updates, so a
+# release build takes the number its tag or branch names.
+label_release_version() {
+    [[ "$MIXAR_REF" =~ ^(release/)?v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || return 0
+    local major=$(( 10#${BASH_REMATCH[2]} )) minor=$(( 10#${BASH_REMATCH[3]} )) patch=$(( 10#${BASH_REMATCH[4]} ))
+    local version="$major.$minor.$patch"
+    [[ "$MIXAR_VERSION" == "$version" ]] && return 0
+    local header="$MIXAR_DIR/src/source/blender/blenkernel/BKE_blender_version.h"
+    grep -qE '^#define MIXAR_VERSION [0-9]+$' "$header" && grep -qE '^#define MIXAR_VERSION_PATCH [0-9]+$' "$header" \
+        || die "cannot label $MIXAR_REF as $version: no MIXAR_VERSION defines in $header"
+    sed -i -E -e "s/^#define MIXAR_VERSION [0-9]+$/#define MIXAR_VERSION $(( major * 100 + minor ))/" \
+        -e "s/^#define MIXAR_VERSION_PATCH [0-9]+$/#define MIXAR_VERSION_PATCH $patch/" "$header"
+    echo "$version" > "$MIXAR_DIR/VERSION"
+    echo "$MIXAR_REF says $MIXAR_VERSION in VERSION and BKE_blender_version.h: building it as $version"
+    MIXAR_VERSION="$version"
 }
 
 apply_patches() {
@@ -362,6 +390,7 @@ main() {
     select_compiler
     resolve_mixar_ref
     fetch_mixar
+    label_release_version
     apply_patches
     fetch_blender
     df -h "$WORK_DIR" | tail -n 1

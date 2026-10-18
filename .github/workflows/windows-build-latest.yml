@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: 2026 aimcrazyxx
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-# Builds the newest Mixar (Mixar-AI/mixar-app, main by default) for Windows
-# x64 with this repository's patches/series - the same patches the Kaggle
-# Linux build applies - and uploads build/Prod/bin as an artifact.
+# Builds the newest Mixar release (Mixar-AI/mixar-app: the newest vX.Y.Z tag
+# or release/vX.Y.Z branch by default) for Windows x64 with this repository's
+# patches/series - the same patches the Kaggle Linux build applies - and
+# uploads build/Prod/bin as an artifact.
 # Kaggle only runs Linux, so Windows builds happen here, on a hosted
 # Windows runner (about 2.5 h on its 4 cores).
 
@@ -13,8 +14,8 @@ on:
   workflow_dispatch:
     inputs:
       mixar_ref:
-        description: "Official Mixar branch or tag (main = newest)"
-        default: main
+        description: "Official Mixar ref: latest-release (newest release), main (newest code), or a tag/branch such as v4.3.4"
+        default: latest-release
         required: true
   # push, not pull_request: a pull_request paths filter matches the whole PR
   # diff, so every push to a PR that touches patches/ restarted the build.
@@ -34,9 +35,28 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 360
     env:
-      MIXAR_REF: ${{ inputs.mixar_ref || 'main' }}
+      MIXAR_REF_REQUEST: ${{ inputs.mixar_ref || 'latest-release' }}
 
     steps:
+      # Sets MIXAR_REF for the other steps. Mixar does not tag every release
+      # (4.3.3 only has release/v4.3.3), so latest-release looks at tags and
+      # release branches; when a version has both, the tag wins. Same rule as
+      # kaggle/build_mixar_linux.sh.
+      - name: Resolve the Mixar ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          ref="$MIXAR_REF_REQUEST"
+          if [ "$ref" = latest-release ]; then
+            ref="$(git ls-remote --refs https://github.com/Mixar-AI/mixar-app.git 'refs/tags/v*' 'refs/heads/release/v*' \
+              | sed -E 's#.*refs/(tags|heads)/##' | grep -E '^(release/)?v[0-9]+\.[0-9]+\.[0-9]+$' \
+              | awk '{ v = $0; sub(/^release\//, "", v); print v, ($0 ~ /^release/), $0 }' \
+              | sort -k1,1V -k2,2nr | tail -n1 | cut -d' ' -f3)"
+          fi
+          [[ "$ref" =~ ^[A-Za-z0-9._/-]+$ ]] || { echo "invalid or missing Mixar ref: '$ref'" >&2; exit 1; }
+          echo "Mixar ref: $ref"
+          echo "MIXAR_REF=$ref" >> "$GITHUB_ENV"
+
       # Same layout as windows-build.yml: Mixar at the workspace root (its
       # .bat files need the runner's LF -> CRLF checkout), patches beside it.
       - name: Checkout the newest Mixar
@@ -51,6 +71,36 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: .mixar-app3
+
+      # Mixar's releases carry the previous release's number in VERSION and
+      # BKE_blender_version.h (v4.3.4 says 4.3.3, release/v4.3.3 says 4.3.2).
+      # The app compares that number with the newest release to offer
+      # updates, so a release build takes the number its tag or branch names
+      # (as windows-build.yml did for v4.3.2).
+      - name: Label the build with its release version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $release = [regex]::Match($env:MIXAR_REF, '^(release/)?v(\d+)\.(\d+)\.(\d+)$')
+          if (-not $release.Success) {
+            Write-Host "$env:MIXAR_REF is not a release: keeping its VERSION"
+            exit 0
+          }
+          $major, $minor, $patch = 2..4 | ForEach-Object { [int]$release.Groups[$_].Value }
+          $version = "$major.$minor.$patch"
+          $current = (Get-Content 'VERSION' -Raw).Trim()
+          if ($current -eq $version) { exit 0 }
+          $path = Join-Path $PWD 'src/source/blender/blenkernel/BKE_blender_version.h'
+          $header = [IO.File]::ReadAllText($path)
+          $defines = [ordered]@{ MIXAR_VERSION = $major * 100 + $minor; MIXAR_VERSION_PATCH = $patch }
+          foreach ($name in $defines.Keys) {
+            $pattern = '(?m)^#define ' + $name + ' \d+(?=\r?$)'
+            if ($header -notmatch $pattern) { throw "No #define $name in $path" }
+            $header = $header -replace $pattern, "#define $name $($defines[$name])"
+          }
+          [IO.File]::WriteAllText($path, $header)
+          Set-Content -Path 'VERSION' -Value $version -Encoding utf8
+          Write-Host "$env:MIXAR_REF says $current in VERSION and BKE_blender_version.h: building it as $version"
 
       - name: Show what is being built
         shell: pwsh

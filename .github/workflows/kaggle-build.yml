@@ -11,8 +11,8 @@ on:
   workflow_dispatch:
     inputs:
       mixar_ref:
-        description: "Official Mixar ref: main (newest), latest-tag, or a tag such as v4.3.2"
-        default: main
+        description: "Official Mixar ref: latest-release (newest release), main (newest code), latest-tag, or a tag such as v4.3.4"
+        default: latest-release
         required: true
 
 permissions:
