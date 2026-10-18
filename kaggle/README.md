@@ -15,7 +15,10 @@ O script faz tudo sozinho:
 3. baixa o Blender no commit fixado pelo Mixar e as bibliotecas pré-compiladas desse commit (sem o `dpcpp` de 800 MB, só usado pela GPU Intel);
 4. roda o `scripts/unix/build.sh` oficial com Ninja, mostrando o progresso a cada 1%;
 5. abre o app em modo headless e importa todos os módulos Python do Mixar (teste de fumaça);
-6. empacota em `.tar.xz` com `.sha256` e `BUILD_INFO.txt`.
+6. abre o app com interface num display virtual (Xvfb + OpenGL por software), espera o Mixar
+   registrar a UI, confere que a pilha de camadas de pintura registrou e salva um screenshot
+   (`logs/gui_check.png`);
+7. empacota em `.tar.xz` com `.sha256` e `BUILD_INFO.txt`.
 
 ## Como rodar
 
@@ -52,6 +55,7 @@ recompilar depois de mudar um patch leva minutos.
 | `WORK_DIR` / `OUT_DIR` | `/tmp/mixar-build` / `/kaggle/working` | |
 | `BUILD_CORES` | `nproc` | |
 | `SMOKE_TEST` | `1` | `0` pula o teste de fumaça |
+| `GUI_CHECK` | `1` | `0` pula a verificação com interface |
 
 ## Usando o pacote
 

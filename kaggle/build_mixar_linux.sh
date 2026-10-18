@@ -21,6 +21,7 @@
 #   SKIP_DEPS=1   do not apt-get install the toolchain
 #   USE_CCACHE    1 compiles through ccache (default: 1 outside Kaggle)
 #   SMOKE_TEST=0  skip the headless start-up check of the built app
+#   GUI_CHECK=0   skip opening the app on a virtual display (UI + screenshot)
 
 set -Eeuo pipefail
 
@@ -43,6 +44,7 @@ export BUILD_CORES="${BUILD_CORES:-$(nproc)}"
 SKIP_DEPS="${SKIP_DEPS:-0}"
 USE_CCACHE="${USE_CCACHE:-$(( ON_KAGGLE ? 0 : 1 ))}"
 SMOKE_TEST="${SMOKE_TEST:-1}"
+GUI_CHECK="${GUI_CHECK:-1}"
 
 BLENDER_GIT="https://projects.blender.org/blender/blender.git"
 LIBS_GIT="https://projects.blender.org/blender/lib-linux_x64.git"
@@ -80,6 +82,8 @@ APT_PACKAGES=(
     # Mixar's native sign-in (source/creator): HTTPS via libcurl + OpenSSL,
     # tokens in the Secret Service keyring that Python's keyring also uses.
     pkg-config libcurl4-openssl-dev libssl-dev libsecret-1-dev
+    # GUI check: a virtual display with Mesa's software OpenGL 4.5.
+    xvfb xauth libgl1-mesa-dri libegl-mesa0 libglx-mesa0
 )
 
 install_deps() {
@@ -282,6 +286,28 @@ smoke_test() {
     fi
 }
 
+gui_check() {
+    (( GUI_CHECK )) || return 0
+    if ! command -v xvfb-run >/dev/null 2>&1; then
+        echo "xvfb-run is missing; skipping the GUI check"
+        return 0
+    fi
+    step "GUI check (virtual display: deferred UI registration + screenshot)"
+    local rc=0
+    MIXAR_GUI_CHECK_OUT="$LOG_DIR" timeout 600 xvfb-run -a -s "-screen 0 1600x900x24" \
+        "$BIN_DIR/mixar" --factory-startup --python "$SCRIPT_DIR/gui_check.py" \
+        > "$LOG_DIR/gui_check.log" 2>&1 || rc=$?
+    grep -E '^GUI ' "$LOG_DIR/gui_check.log" || true
+    if [[ -f "$LOG_DIR/gui_check.json" ]] && python3 -c \
+        'import json, sys; sys.exit(0 if json.load(open(sys.argv[1]))["ok"] else 1)' \
+        "$LOG_DIR/gui_check.json"; then
+        GUI_RESULT="passed"
+    else
+        GUI_RESULT="failed (exit $rc, see logs/gui_check.log)"
+        echo "GUI check $GUI_RESULT; packaging anyway"
+    fi
+}
+
 package() {
     local name="mixar-$MIXAR_VERSION-linux-x64"
     local stage_root="$WORK_DIR/pkg"
@@ -300,6 +326,7 @@ package() {
         echo "Compiler:  $($CXX --version | head -n1)"
         echo "Options:   MIXAR_ENV=$MIXAR_ENV MIXAR_CUDA=$MIXAR_CUDA oneAPI=OFF"
         echo "Smoke:     ${SMOKE_RESULT:-skipped}"
+        echo "GUI check: ${GUI_RESULT:-skipped}"
         echo
         echo "Run: ./mixar   (needs glibc 2.39+ / libstdc++ from GCC 14, e.g. Ubuntu 24.04+, Debian 13+, Fedora 40+)"
     } > "$stage_root/$name/BUILD_INFO.txt"
@@ -322,6 +349,7 @@ main() {
     df -h "$WORK_DIR" | tail -n 1
     build_mixar
     smoke_test
+    gui_check
     package
     step "Done in $(( ($(date +%s) - START_TS) / 60 )) min"
     cat "$OUT_DIR/BUILD_INFO.txt"
