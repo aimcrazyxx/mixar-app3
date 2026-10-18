@@ -67,9 +67,12 @@ usa a GPU normalmente.
 ## Limitações
 
 - O Kaggle só roda Linux: este pipeline não gera instaladores de Windows ou macOS.
-- O código público do Mixar não traz o pacote privado `paint/procedural_materials`; a
-  biblioteca de materiais procedurais servida pelo backend não funciona em builds a partir
-  do código público.
+- O código público do Mixar não traz o pacote privado `paint/procedural_materials`, mas um
+  terço do módulo de pintura o importa: sem ele a pintura em camadas nem registra. O patch
+  `paint-procedural-materials-fallback.patch` põe um substituto no lugar, então as camadas
+  normais funcionam; a biblioteca de materiais procedurais do backend e a geração de
+  materiais por IA (MatGen) aparecem como indisponíveis, e nenhum script de material é
+  executado.
 - O pacote é para uso pessoal. Os logos e ícones do Mixar não são GPL
   ([TRADEMARKS.md](https://github.com/Mixar-AI/mixar-app/blob/main/TRADEMARKS.md)): não
   redistribua o build sem removê-los ou substituí-los.

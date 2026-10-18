@@ -142,15 +142,23 @@ apply_patches() {
     APPLIED_PATCHES=()
     [[ -f "$PATCH_SERIES" ]] || { echo "No patch series at $PATCH_SERIES"; return; }
     step "Applying patches from $PATCH_SERIES"
-    local name patch
+    local name patch optional
     while IFS= read -r name || [[ -n "$name" ]]; do
         name="${name%%#*}"
         name="$(echo "$name" | xargs)"
         [[ -n "$name" ]] || continue
+        # "?name" marks a patch that may stop applying once upstream catches
+        # up (e.g. ships what it adds): skipped with a warning, not fatal.
+        optional=0
+        if [[ "$name" == \?* ]]; then optional=1; name="${name#\?}"; fi
         patch="$(dirname "$PATCH_SERIES")/$name"
         [[ -f "$patch" ]] || die "patch listed in the series is missing: $patch"
         if ! git -C "$MIXAR_DIR" apply --check "$patch" 2>"$LOG_DIR/patch-$name.err"; then
             cat "$LOG_DIR/patch-$name.err" >&2
+            if (( optional )); then
+                echo "  WARNING: skipped optional $name: it no longer applies to Mixar ${MIXAR_COMMIT:0:12}"
+                continue
+            fi
             die "$name no longer applies to Mixar ${MIXAR_COMMIT:0:12}; rebase it onto the new version"
         fi
         git -C "$MIXAR_DIR" apply "$patch"

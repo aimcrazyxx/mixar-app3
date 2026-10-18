@@ -2,5 +2,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
 # Patches applied, in order, on top of the official Mixar source by
-# kaggle/build_mixar_linux.sh. One file name per line; '#' starts a comment.
+# kaggle/build_mixar_linux.sh. One file name per line; '#' starts a comment;
+# a leading '?' marks a patch that is skipped (with a warning) once it stops
+# applying, instead of failing the build.
 byok-4.3.2.patch
+?paint-procedural-materials-fallback.patch
