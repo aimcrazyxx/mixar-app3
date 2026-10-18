@@ -21,23 +21,23 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Mixar-AI/mixar-app
-          ref: v4.2.3
+          ref: v4.3.2
           submodules: recursive
           fetch-depth: 1
 
 
-      - name: Correct stale version metadata in official v4.2.3 tag
+      - name: Correct stale version metadata in official v4.3.2 tag
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $version = (Get-Content 'VERSION' -Raw).Trim()
-          if ($version -notin @('4.2.2', '4.2.3')) { throw "Unexpected source version: $version" }
-          Set-Content -Path 'VERSION' -Value '4.2.3' -Encoding utf8
+          if ($version -notin @('4.3.1', '4.3.2')) { throw "Unexpected source version: $version" }
+          Set-Content -Path 'VERSION' -Value '4.3.2' -Encoding utf8
           $path = 'src/source/blender/blenkernel/BKE_blender_version.h'
           $header = Get-Content $path -Raw
-          if ($header -notmatch '#define MIXAR_VERSION 402') { throw 'Unexpected Mixar major/minor version' }
-          $header = $header.Replace('#define MIXAR_VERSION_PATCH 2', '#define MIXAR_VERSION_PATCH 3')
-          if ($header -notmatch '#define MIXAR_VERSION_PATCH 3') { throw 'Version correction failed' }
+          if ($header -notmatch '#define MIXAR_VERSION 403') { throw 'Unexpected Mixar major/minor version' }
+          $header = $header.Replace('#define MIXAR_VERSION_PATCH 1', '#define MIXAR_VERSION_PATCH 2')
+          if ($header -notmatch '#define MIXAR_VERSION_PATCH 2') { throw 'Version correction failed' }
           Set-Content -Path $path -Value $header -Encoding utf8
           git rev-parse HEAD
           Get-Content 'VERSION'
@@ -74,7 +74,7 @@ jobs:
       - name: Upload latest Mixar Windows build
         uses: actions/upload-artifact@v4
         with:
-          name: mixar-4.2.3-windows-prod-cpu
+          name: mixar-4.3.2-windows-prod-cpu
           path: build/Prod/bin/
           if-no-files-found: error
           retention-days: 14
