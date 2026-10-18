@@ -72,6 +72,19 @@ jobs:
         with:
           path: .mixar-app3
 
+      - name: Apply non-persistent random device ID
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $source = '.mixar-app3/src/scripts/mixar/modules/auth/core/device.py'
+          $target = 'src/scripts/mixar/modules/auth/core/device.py'
+          if (-not (Test-Path $source)) { throw "Missing custom device module: $source" }
+          Copy-Item -LiteralPath $source -Destination $target -Force
+          if (-not (Select-String -Path $target -Pattern 'uuid\.uuid4\(\)' -Quiet)) {
+            throw 'The copied device module does not generate a random UUID'
+          }
+          Write-Host "Applied $source -> $target"
+
       # Mixar's releases carry the previous release's number in VERSION and
       # BKE_blender_version.h (v4.3.4 says 4.3.3, release/v4.3.3 says 4.3.2).
       # The app compares that number with the newest release to offer
