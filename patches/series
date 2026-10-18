@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: 2026 aimcrazyxx
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Patches applied, in order, on top of the official Mixar source by
+# kaggle/build_mixar_linux.sh. One file name per line; '#' starts a comment.
+byok-4.3.2.patch

@@ -7,7 +7,7 @@ build/
 install/
 dist/
 /source/
-/patches/
+# patches/ holds the overlay patches kaggle/build_mixar_linux.sh applies.
 upstream_build/
 build_darwin/
 build-old/

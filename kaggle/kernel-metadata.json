@@ -1,0 +1,15 @@
+{
+  "id": "KAGGLE_USERNAME/mixar-linux-build",
+  "title": "Mixar Linux Build",
+  "code_file": "mixar-linux-build.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": false,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

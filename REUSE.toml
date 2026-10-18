@@ -113,3 +113,13 @@ path = [
 precedence = "override"
 SPDX-FileCopyrightText = "KIRI Engine contributors"
 SPDX-License-Identifier = "Apache-2.0"
+
+# Kaggle build pipeline data files (JSON cannot carry an SPDX comment).
+[[annotations]]
+path = [
+  "kaggle/kernel-metadata.json",
+  "kaggle/mixar-linux-build.ipynb",
+]
+precedence = "closest"
+SPDX-FileCopyrightText = "2026 aimcrazyxx"
+SPDX-License-Identifier = "GPL-3.0-or-later"

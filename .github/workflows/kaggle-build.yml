@@ -1,0 +1,57 @@
+# SPDX-FileCopyrightText: 2026 aimcrazyxx
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Builds the newest Mixar for Linux on Kaggle (kaggle/README.md) and attaches
+# the tarball as a workflow artifact. Needs the repository secret
+# KAGGLE_API_TOKEN (a Kaggle API token from kaggle.com/settings).
+
+name: Kaggle Linux build
+
+on:
+  workflow_dispatch:
+    inputs:
+      mixar_ref:
+        description: "Official Mixar ref: main (newest), latest-tag, or a tag such as v4.3.2"
+        default: main
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  kaggle:
+    runs-on: ubuntu-latest
+    # The Kaggle run itself takes 3-4 h on 4 vCPUs; GitHub caps a job at 6 h.
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install the Kaggle CLI
+        run: python -m pip install 'kaggle>=1.7'
+
+      - name: Build on Kaggle and download the result
+        env:
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+          MIXAR_REF_INPUT: ${{ inputs.mixar_ref }}
+        run: |
+          if [ -z "$KAGGLE_API_TOKEN" ]; then
+            echo "::error::Add the KAGGLE_API_TOKEN repository secret first."
+            exit 1
+          fi
+          kaggle/push_kernel.sh --ref "$GITHUB_REF_NAME" --mixar-ref "$MIXAR_REF_INPUT" \
+            --wait --download kaggle-output
+
+      - name: Upload the Linux build
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mixar-linux-x64
+          path: |
+            kaggle-output/*.tar.xz
+            kaggle-output/*.sha256
+            kaggle-output/BUILD_INFO.txt
+            kaggle-output/logs/
+          if-no-files-found: warn
+          retention-days: 14
