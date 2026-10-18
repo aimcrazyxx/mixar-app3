@@ -14,13 +14,14 @@ saves a screenshot and quits. The verdict goes to gui_check.json.
 import json
 import logging
 import os
+import subprocess
 import sys
 import time
 
 import bpy
 
 OUT_DIR = os.environ.get("MIXAR_GUI_CHECK_OUT", ".")
-TIMEOUT_S = 300
+TIMEOUT_S = float(os.environ.get("MIXAR_GUI_CHECK_TIMEOUT", "300"))
 _started = time.monotonic()
 _records = []
 
@@ -42,13 +43,20 @@ def _paint_registered():
                 and getattr(bpy.types, "MLayer", None))
 
 
-def _screenshot(window):
+def _screenshot():
+    """PNG of the virtual display. Blender's own screenshot operator reads
+    back an all-black frame under Xvfb's software OpenGL, so grab the X
+    server's framebuffer instead (x11-apps + netpbm)."""
     path = os.path.abspath(os.path.join(OUT_DIR, "gui_check.png"))
     try:
-        with bpy.context.temp_override(window=window, screen=window.screen):
-            bpy.ops.screen.screenshot(filepath=path, check_existing=False)
+        data = subprocess.run(["xwd", "-root", "-silent", "-display", os.environ.get("DISPLAY", "")],
+                              capture_output=True, check=True, timeout=60).stdout
+        for tool in ("xwdtopnm", "pnmtopng"):
+            data = subprocess.run([tool], input=data, capture_output=True, check=True, timeout=60).stdout
+        with open(path, "wb") as f:
+            f.write(data)
         return path
-    except Exception as exc:  # noqa: BLE001 - a screenshot is a bonus
+    except (OSError, subprocess.SubprocessError) as exc:  # a screenshot is a bonus
         print(f"GUI screenshot failed: {exc}")
         return ""
 
@@ -67,7 +75,7 @@ def _finish():
     }
     result["ok"] = complete and result["paint_layer_stack_registered"] and not ui_errors
     window = bpy.context.window_manager.windows[0]
-    result["screenshot"] = _screenshot(window)
+    result["screenshot"] = _screenshot()
     with open(os.path.join(OUT_DIR, "gui_check.json"), "w") as f:
         json.dump(result, f, indent=2)
     print(f"GUI ok={result['ok']} ui_complete={complete} "

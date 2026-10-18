@@ -82,8 +82,9 @@ APT_PACKAGES=(
     # Mixar's native sign-in (source/creator): HTTPS via libcurl + OpenSSL,
     # tokens in the Secret Service keyring that Python's keyring also uses.
     pkg-config libcurl4-openssl-dev libssl-dev libsecret-1-dev
-    # GUI check: a virtual display with Mesa's software OpenGL 4.5.
-    xvfb xauth libgl1-mesa-dri libegl-mesa0 libglx-mesa0
+    # GUI check: a virtual display with Mesa's software OpenGL 4.5, and the
+    # X tools that screenshot it.
+    xvfb xauth libgl1-mesa-dri libegl-mesa0 libglx-mesa0 x11-apps netpbm
 )
 
 install_deps() {
