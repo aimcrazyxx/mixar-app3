@@ -34,8 +34,14 @@ O script faz tudo sozinho:
 kaggle/push_kernel.sh --wait --download saida/
 ```
 
-`--ref` escolhe a branch deste repositório que o notebook clona e `--mixar-ref` a versão do
-Mixar (`main`, `latest-tag` ou uma tag como `v4.3.2`).
+`--ref` escolhe a branch deste repositório que o notebook clona, `--mixar-ref` a versão do
+Mixar (`main`, `latest-tag` ou uma tag como `v4.3.2`) e `--slug` o notebook (padrão
+`mixar-linux-build`).
+
+O Kaggle cancela uma versão enviada enquanto outra versão do mesmo notebook ainda roda
+(*Canceled by backend*, poucos minutos depois de começar). Por isso o script se recusa a
+enviar nesse caso: espere a execução terminar, cancele-a no site ou use outro `--slug`
+(`--force` envia mesmo assim).
 
 **Pelo GitHub Actions.** Adicione o token do Kaggle como secret `KAGGLE_API_TOKEN` do
 repositório (Settings → Secrets and variables → Actions) e rode o workflow
