@@ -127,10 +127,10 @@ index 9941c88..6db5125 100644
      return parsed
 diff --git a/src/scripts/mixar/modules/byok/core/custom_endpoint.py b/src/scripts/mixar/modules/byok/core/custom_endpoint.py
 new file mode 100644
-index 0000000..7cdce65
+index 0000000..ad3628c
 --- /dev/null
 +++ b/src/scripts/mixar/modules/byok/core/custom_endpoint.py
-@@ -0,0 +1,35 @@
+@@ -0,0 +1,49 @@
 +# SPDX-FileCopyrightText: 2026 aimcrazyxx
 +# SPDX-License-Identifier: GPL-3.0-or-later
 +
@@ -166,18 +166,39 @@ index 0000000..7cdce65
 +        and (item.get("base_url") or "").rstrip("/") == base_url.rstrip("/")
 +        for item in items
 +    )
++
++
++def form_base_url(wm):
++    """The custom Base URL typed into the BYOK form ('' when none)."""
++    return (getattr(wm, "byok_form_base_url", "") or "").strip()
++
++
++def form_target(wm):
++    """(base_url, model) to save: a custom Base URL takes the typed model ID,
++    otherwise the model picked from the provider's catalog."""
++    base_url = form_base_url(wm)
++    if base_url:
++        return base_url, (getattr(wm, "byok_form_custom_model", "") or "").strip()
++    return base_url, wm.byok_form_model
 diff --git a/src/scripts/mixar/modules/byok/ui/operators/byok_ops.py b/src/scripts/mixar/modules/byok/ui/operators/byok_ops.py
-index 2f18a81..eaf87b9 100644
+index 2f18a81..0a8e44e 100644
 --- a/src/scripts/mixar/modules/byok/ui/operators/byok_ops.py
 +++ b/src/scripts/mixar/modules/byok/ui/operators/byok_ops.py
-@@ -259,12 +259,14 @@ class MIXAR_BYOK_OT_save(Operator):
+@@ -29,7 +29,7 @@ from mixar.modules.common.ui.constants import CARD_DIALOG_WIDTH
+ from mixar.modules.common.i18n import n_
+ 
+ from ...core import byok_client, credential_state, model_suggestions, models_cache
+-from ...core import key_prompt, preference_state
++from ...core import custom_endpoint, key_prompt, preference_state
+ from ...core.local_switch import (
+     deregister_local_if_switched_away as _deregister_local_if_switched_away,
+ )
+@@ -259,12 +259,12 @@ class MIXAR_BYOK_OT_save(Operator):
          if model_suggestions.is_local(provider):
              return self._execute_local(wm)
  
 -        model = wm.byok_form_model
-+        base_url = (getattr(wm, 'byok_form_base_url', '') or '').strip()
-+        model = ((getattr(wm, 'byok_form_custom_model', '') or '').strip()
-+                 if base_url else wm.byok_form_model)
++        base_url, model = custom_endpoint.form_target(wm)
          api_key = wm.byok_form_api_key.strip()
  
          # Name what is actually missing (a picked model is never asked for again).
@@ -187,19 +208,21 @@ index 2f18a81..eaf87b9 100644
                     else n_("Enter your API key.") if not api_key else "")
          if problem:
              wm.byok_dialog_state, wm.byok_last_error = 'ERROR', problem
-@@ -279,6 +281,7 @@ class MIXAR_BYOK_OT_save(Operator):
+@@ -278,7 +278,7 @@ class MIXAR_BYOK_OT_save(Operator):
+         byok_client.save_credentials(
              provider=provider,
              model=model,
-             api_key=api_key,
-+            base_url=base_url or None,
+-            api_key=api_key,
++            api_key=api_key, base_url=base_url or None,
              on_done=_save_callback(),
          )
          return {'FINISHED'}
-@@ -302,6 +305,7 @@ class MIXAR_BYOK_OT_save(Operator):
+@@ -301,7 +301,7 @@ class MIXAR_BYOK_OT_save(Operator):
+         byok_client.save_credentials(
              provider='openrouter',
              model=model,
-             api_key=api_key,
-+            base_url=(getattr(wm, 'byok_form_base_url', '') or '').strip() or None,
+-            api_key=api_key,
++            api_key=api_key, base_url=custom_endpoint.form_base_url(wm) or None,
              on_done=_save_callback(),
          )
          return {'FINISHED'}
@@ -312,10 +335,10 @@ index ecbab1b..007b224 100644
      # dialog surfaces a note. Defaults True (platform + vision models).
 diff --git a/tests/test_byok_custom_endpoint.py b/tests/test_byok_custom_endpoint.py
 new file mode 100644
-index 0000000..f6ead3d
+index 0000000..28f50e6
 --- /dev/null
 +++ b/tests/test_byok_custom_endpoint.py
-@@ -0,0 +1,139 @@
+@@ -0,0 +1,151 @@
 +# SPDX-FileCopyrightText: 2026 aimcrazyxx
 +# SPDX-License-Identifier: GPL-3.0-or-later
 +import importlib.util
@@ -455,6 +478,18 @@ index 0000000..f6ead3d
 +                continue
 +            returns = [i for i, stmt in enumerate(body) if isinstance(stmt, ast.Return)]
 +            assert not returns or returns[0] == len(body) - 1, f"unreachable code after return in {name}"
++
++
++def test_form_target_takes_the_typed_model_only_with_a_custom_base_url():
++    from types import SimpleNamespace
++
++    picked = SimpleNamespace(byok_form_base_url="", byok_form_custom_model="ignored",
++                             byok_form_model="gpt-5")
++    assert endpoint.form_target(picked) == ("", "gpt-5")
++    custom = SimpleNamespace(byok_form_base_url=" https://api.example.com/v1 ",
++                             byok_form_custom_model=" my-model ", byok_form_model="gpt-5")
++    assert endpoint.form_target(custom) == ("https://api.example.com/v1", "my-model")
++    assert endpoint.form_base_url(SimpleNamespace()) == ""
 diff --git a/tests/test_byok_key_store.py b/tests/test_byok_key_store.py
 index 0612920..e9f20ee 100644
 --- a/tests/test_byok_key_store.py
