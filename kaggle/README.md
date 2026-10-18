@@ -70,7 +70,10 @@ usa a GPU normalmente.
 
 ## Limitações
 
-- O Kaggle só roda Linux: este pipeline não gera instaladores de Windows ou macOS.
+- O Kaggle só roda Linux, e o Blender não compila para Windows a partir do Linux. O build
+  de Windows é o workflow *Windows build (newest Mixar)*
+  (`.github/workflows/windows-build-latest.yml`): mesmo Mixar e mesmos patches, num runner
+  Windows do GitHub Actions (~2h30); o resultado sai como artifact da execução.
 - O código público do Mixar não traz o pacote privado `paint/procedural_materials`, mas um
   terço do módulo de pintura o importa: sem ele a pintura em camadas nem registra. O patch
   `paint-procedural-materials-fallback.patch` põe um substituto no lugar, então as camadas

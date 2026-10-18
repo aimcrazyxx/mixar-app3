@@ -1,0 +1,136 @@
+# SPDX-FileCopyrightText: 2026 aimcrazyxx
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Builds the newest Mixar (Mixar-AI/mixar-app, main by default) for Windows
+# x64 with this repository's patches/series - the same patches the Kaggle
+# Linux build applies - and uploads build/Prod/bin as an artifact.
+# Kaggle only runs Linux, so Windows builds happen here, on a hosted
+# Windows runner (about 2.5 h on its 4 cores).
+
+name: Windows build (newest Mixar)
+
+on:
+  workflow_dispatch:
+    inputs:
+      mixar_ref:
+        description: "Official Mixar branch or tag (main = newest)"
+        default: main
+        required: true
+  pull_request:
+    paths:
+      - "patches/**"
+      - ".github/workflows/windows-build-latest.yml"
+
+concurrency:
+  group: windows-build-latest-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    runs-on: windows-2022
+    timeout-minutes: 360
+    env:
+      MIXAR_REF: ${{ inputs.mixar_ref || 'main' }}
+
+    steps:
+      # Same layout as windows-build.yml: Mixar at the workspace root (its
+      # .bat files need the runner's LF -> CRLF checkout), patches beside it.
+      - name: Checkout the newest Mixar
+        uses: actions/checkout@v4
+        with:
+          repository: Mixar-AI/mixar-app
+          ref: ${{ env.MIXAR_REF }}
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Checkout this repository's patches
+        uses: actions/checkout@v4
+        with:
+          path: .mixar-app3
+
+      - name: Show what is being built
+        shell: pwsh
+        run: |
+          git log -1 --format='Mixar %h %s (%cs)'
+          git -C upstream log -1 --format='Blender %h %s (%cs)'
+          $version = (Get-Content 'VERSION' -Raw).Trim()
+          "MIXAR_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Version $version"
+
+      - name: Apply patches/series
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($line in Get-Content '.mixar-app3/patches/series') {
+            $name = ($line -replace '#.*$', '').Trim()
+            if (-not $name) { continue }
+            # '?name': skipped with a warning once it stops applying (see the series header).
+            $optional = $name.StartsWith('?')
+            if ($optional) { $name = $name.Substring(1) }
+            $patch = Join-Path '.mixar-app3/patches' $name
+            git apply --check $patch
+            if ($LASTEXITCODE -ne 0) {
+              if ($optional) {
+                Write-Warning "Skipped optional ${name}: it no longer applies"
+                # The runner fails a step whose last native command failed.
+                $global:LASTEXITCODE = 0
+                continue
+              }
+              throw "$name no longer applies to Mixar $env:MIXAR_REF; rebase it onto the new version"
+            }
+            git apply $patch
+            if ($LASTEXITCODE -ne 0) { throw "Could not apply $name" }
+            Write-Host "applied $name"
+          }
+
+      - name: Set up Python 3.13 (Blender 5.2's) for the patch tests
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Test the patched modules
+        shell: pwsh
+        run: |
+          # The BYOK suite imports cryptography (sealed keys) and the rest of
+          # the app's runtime packages, so install exactly what the app bundles.
+          python -m pip install pytest -r scripts/python_requirements.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Test dependency installation failed' }
+          $tests = @(Get-ChildItem tests/test_byok*.py | ForEach-Object { $_.FullName })
+          $tests += 'tests/test_modal_dialog_hides_docks.py'
+          if (Test-Path 'tests/test_procedural_materials_fallback.py') { $tests += 'tests/test_procedural_materials_fallback.py' }
+          python -m pytest -q -p no:cacheprovider @tests
+          if ($LASTEXITCODE -ne 0) { throw 'Patched-module tests failed' }
+
+      - name: Disable OneAPI for the CPU runner
+        shell: pwsh
+        run: |
+          $line = 'set(WITH_CYCLES_DEVICE_ONEAPI OFF CACHE BOOL "Disable Cycles Intel OneAPI device" FORCE)'
+          Add-Content -Path 'cmake/mixar_overrides.cmake' -Value $line
+
+      - name: Enable Git LFS
+        shell: pwsh
+        run: git lfs install --local
+
+      - name: Initialize Blender and Windows libraries
+        shell: cmd
+        run: echo y| call scripts\\windows\\init.bat
+
+      - name: Build Mixar (CPU)
+        shell: cmd
+        env:
+          MIXAR_ENV: Prod
+          MIXAR_CUDA: '0'
+          MIXAR_CUDA_BINARIES: '0'
+          BUILD_WITH_NINJA: '1'
+        run: call scripts\\windows\\build_ninja.bat
+
+      - name: Upload the Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: mixar-${{ env.MIXAR_VERSION }}-windows-x64-cpu
+          path: build/Prod/bin/
+          if-no-files-found: error
+          retention-days: 14
