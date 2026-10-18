@@ -42,10 +42,11 @@ kaggle/push_kernel.sh --wait --download saida/
 Mixar (`latest-release`, o padrão; `main`, `latest-tag` ou uma tag como `v4.3.4`) e
 `--slug` o notebook (padrão `mixar-linux-build`).
 
-O Kaggle cancela uma versão enviada enquanto outra versão do mesmo notebook ainda roda
-(*Canceled by backend*, poucos minutos depois de começar). Por isso o script se recusa a
-enviar nesse caso: espere a execução terminar, cancele-a no site ou use outro `--slug`
-(`--force` envia mesmo assim).
+O Kaggle cancelou as versões 2 a 4 de um mesmo notebook uns 5 minutos depois de começarem
+(*Canceled by backend*): duas enviadas enquanto a versão 1 ainda rodava e uma depois de ela
+terminar. A primeira versão de um notebook novo rodou normalmente todas as vezes. Por isso o
+script se recusa a enviar enquanto outra versão roda (`--force` envia mesmo assim) e, se uma
+versão nova for cancelada assim mesmo, o caminho é um notebook novo com `--slug`.
 
 **Pelo GitHub Actions.** Adicione o token do Kaggle como secret `KAGGLE_API_TOKEN` do
 repositório (Settings → Secrets and variables → Actions) e rode o workflow

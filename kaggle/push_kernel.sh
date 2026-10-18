@@ -13,9 +13,11 @@
 #   --download   after --wait, fetch the run's output (tarball, logs) into DIR
 #   --force      push even while an earlier version of the notebook still runs
 #
-# Kaggle cancels a version pushed while an earlier version of the same notebook
-# is still running ("Canceled by backend", a few minutes in), so the script
-# refuses to push then: wait for that run, or build in another notebook (--slug).
+# Kaggle cancelled versions 2-4 of a notebook about five minutes in ("Canceled
+# by backend"): two pushed while version 1 was still running, one after it had
+# finished. The first version of a new notebook ran normally each time. So the
+# script refuses to push while a version still runs, and when a new version is
+# cancelled anyway, --slug builds in a new notebook.
 #
 # Needs the Kaggle CLI (pip install kaggle) and an API token: KAGGLE_API_TOKEN,
 # or ~/.kaggle/access_token. KAGGLE_USERNAME is looked up when unset.
@@ -38,7 +40,7 @@ while (( $# )); do
         --wait) WAIT=1; shift ;;
         --download) DOWNLOAD="$2"; shift 2 ;;
         --force) FORCE=1; shift ;;
-        -h|--help) sed -n '5,21p' "$0"; exit 0 ;;
+        -h|--help) sed -n '5,23p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
